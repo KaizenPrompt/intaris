@@ -1,6 +1,6 @@
 [project]
 name = "hermes-intaris"
-version = "0.1.0"
+version = "0.2.0"
 description = "Hermes Agent plugin for Intaris — tool call safety guardrails with session management and MCP proxy"
 readme = "README.md"
 requires-python = ">=3.11"

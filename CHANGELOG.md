@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.7] - 2026-05-04
+
+### Added
+
+- **Session deep links** -- Preserve and restore session detail selections from URL fragments so shared management UI links open directly to the intended session.
+
+### Changed
+
+- **Hermes plugin release** -- Release `hermes-intaris` `0.2.0` with audit call ID correlation, richer tool result recording, and aligned evaluation timeout handling.
+- **OpenClaw plugin release** -- Release `@fpytloun/openclaw-intaris` `0.3.0` with audit call ID mapping, richer tool result recording, reusable escalation polling, and aligned evaluation timeout handling.
+- **Release metadata** -- Bump the Intaris package and MCP proxy client identity to `0.4.7`.
+
 ## [0.4.6] - 2026-04-23
 
 ### Added
@@ -214,6 +226,7 @@ Initial release.
 - **Client integrations** -- OpenCode plugin (`intaris.ts`) and Claude Code hooks (bash scripts).
 - **Documentation** -- Architecture, evaluation pipeline, configuration, REST API, MCP proxy, management UI, deployment, development, and client integration guides.
 
+[0.4.7]: https://github.com/fpytloun/intaris/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/fpytloun/intaris/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/fpytloun/intaris/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/fpytloun/intaris/compare/v0.4.3...v0.4.4

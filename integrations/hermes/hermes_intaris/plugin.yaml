@@ -1,5 +1,5 @@
 name: intaris
-version: 0.1.0
+version: 0.2.0
 description: >-
   Intaris guardrails — evaluates every tool call through Intaris's safety
   pipeline before allowing execution. Wraps all registered tools with
