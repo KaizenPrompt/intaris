@@ -3,12 +3,14 @@
 Provides endpoints for:
 - POST /session/{id}/events — append events (single or batch)
 - GET /session/{id}/events — read events with pagination and filtering
+- GET /session/{id}/events/export — export a reconstructable session snapshot
 - POST /session/{id}/events/flush — force flush buffered events
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -16,6 +18,7 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
 from intaris.api.deps import SessionContext, get_session_context
 from intaris.api.schemas import (
@@ -64,6 +67,21 @@ def _validate_session_exists(request: Request, user_id: str, session_id: str) ->
         )
 
 
+def _get_session_or_404(user_id: str, session_id: str) -> dict[str, Any]:
+    """Return session metadata, or raise a tenant-scoped 404."""
+    from intaris.server import _get_db
+    from intaris.session import SessionStore
+
+    store = SessionStore(_get_db())
+    try:
+        return store.get(session_id, user_id=user_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session {session_id} not found.",
+        )
+
+
 def _get_idempotency_store() -> EventAppendIdempotencyStore:
     """Return the DB-backed idempotency ledger helper."""
     from intaris.server import _get_db
@@ -78,6 +96,135 @@ def _response_from_record(record: dict[str, Any]) -> EventAppendResponse:
         first_seq=int(record.get("first_seq") or 0),
         last_seq=int(record.get("last_seq") or 0),
     )
+
+
+def _parse_event_filters(
+    *,
+    type: str | None,
+    source: str | None,
+    exclude_source: str | None,
+    data_source: str | None,
+) -> tuple[set[str] | None, set[str] | None, set[str] | None, set[str] | None]:
+    """Parse comma-separated event filters shared by read and export endpoints."""
+    event_types: set[str] | None = None
+    if type:
+        event_types = set(type.split(","))
+        invalid = event_types - VALID_EVENT_TYPES
+        if invalid:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid event type(s): {', '.join(sorted(invalid))}. "
+                    f"Valid types: {', '.join(sorted(VALID_EVENT_TYPES))}"
+                ),
+            )
+
+    event_sources = set(source.split(",")) if source else None
+    event_exclude_sources = set(exclude_source.split(",")) if exclude_source else None
+    event_data_sources = set(data_source.split(",")) if data_source else None
+
+    return event_types, event_sources, event_exclude_sources, event_data_sources
+
+
+def _export_filter_metadata(
+    *,
+    type: str | None,
+    source: str | None,
+    exclude_source: str | None,
+    data_source: str | None,
+    turn_id: str | None,
+    min_position: int | None,
+    max_position: int | None,
+    after_ts: str | None,
+    before_ts: str | None,
+) -> dict[str, Any]:
+    """Return only active event filters for export provenance."""
+    filters: dict[str, Any] = {}
+    if type:
+        filters["type"] = type.split(",")
+    if source:
+        filters["source"] = source.split(",")
+    if exclude_source:
+        filters["exclude_source"] = exclude_source.split(",")
+    if data_source:
+        filters["data_source"] = data_source.split(",")
+    if turn_id:
+        filters["turn_id"] = turn_id
+    if min_position is not None:
+        filters["min_position"] = min_position
+    if max_position is not None:
+        filters["max_position"] = max_position
+    if after_ts:
+        filters["after_ts"] = after_ts
+    if before_ts:
+        filters["before_ts"] = before_ts
+    return filters
+
+
+def _parse_json_field(row: dict[str, Any], field: str) -> None:
+    """Parse a JSON-encoded DB field in-place when present."""
+    if row.get(field):
+        try:
+            row[field] = json.loads(row[field])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+
+def _get_export_audit_log(user_id: str, session_id: str) -> list[dict[str, Any]]:
+    """Return complete audit rows for a session in chronological order."""
+    from intaris.server import _get_db
+
+    with _get_db().cursor() as cur:
+        cur.execute(
+            """
+            SELECT * FROM audit_log
+            WHERE user_id = ? AND session_id = ?
+            ORDER BY timestamp ASC, id ASC
+            """,
+            (user_id, session_id),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+
+    for row in rows:
+        _parse_json_field(row, "args_redacted")
+        if "injection_detected" in row and row["injection_detected"] is not None:
+            row["injection_detected"] = bool(row["injection_detected"])
+    return rows
+
+
+def _get_export_summaries(user_id: str, session_id: str) -> dict[str, list[dict[str, Any]]]:
+    """Return Intaris and agent summaries with JSON fields decoded."""
+    from intaris.server import _get_db
+
+    with _get_db().cursor() as cur:
+        cur.execute(
+            """
+            SELECT * FROM session_summaries
+            WHERE user_id = ? AND session_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (user_id, session_id),
+        )
+        intaris_summaries = [dict(row) for row in cur.fetchall()]
+
+        cur.execute(
+            """
+            SELECT * FROM agent_summaries
+            WHERE user_id = ? AND session_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (user_id, session_id),
+        )
+        agent_summaries = [dict(row) for row in cur.fetchall()]
+
+    for summary in intaris_summaries:
+        _parse_json_field(summary, "tools_used")
+        _parse_json_field(summary, "risk_indicators")
+
+    return {
+        "session_summaries": intaris_summaries,
+        "agent_summaries": agent_summaries,
+    }
 
 
 async def _wait_for_completed_record(
@@ -355,30 +502,14 @@ async def read_events(
             detail="min_position must be <= max_position",
         )
 
-    # Parse type filter
-    event_types: set[str] | None = None
-    if type:
-        event_types = set(type.split(","))
-        invalid = event_types - VALID_EVENT_TYPES
-        if invalid:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Invalid event type(s): {', '.join(sorted(invalid))}. "
-                    f"Valid types: {', '.join(sorted(VALID_EVENT_TYPES))}"
-                ),
-            )
-
-    # Parse source filter
-    event_sources: set[str] | None = None
-    if source:
-        event_sources = set(source.split(","))
-    event_exclude_sources: set[str] | None = None
-    if exclude_source:
-        event_exclude_sources = set(exclude_source.split(","))
-    event_data_sources: set[str] | None = None
-    if data_source:
-        event_data_sources = set(data_source.split(","))
+    event_types, event_sources, event_exclude_sources, event_data_sources = (
+        _parse_event_filters(
+            type=type,
+            source=source,
+            exclude_source=exclude_source,
+            data_source=data_source,
+        )
+    )
 
     # Validate session exists
     _validate_session_exists(request, ctx.user_id, session_id)
@@ -437,6 +568,144 @@ async def read_events(
         events=events,
         last_seq=last_seq,
         has_more=has_more,
+    )
+
+
+@router.get(
+    "/session/{session_id}/events/export",
+    summary="Export session events and metadata",
+    description=(
+        "Export a reconstructable JSON snapshot for a single session. "
+        "Session metadata, audit records, and summaries are complete; event "
+        "filters apply only to the exported events array."
+    ),
+)
+async def export_events(
+    session_id: str,
+    request: Request,
+    ctx: SessionContext = Depends(get_session_context),
+    type: str | None = Query(
+        None,
+        description="Comma-separated event type filter (e.g., 'tool_call,evaluation')",
+    ),
+    source: str | None = Query(
+        None,
+        description="Comma-separated source include filter (e.g., 'opencode,client')",
+    ),
+    exclude_source: str | None = Query(
+        None,
+        description="Comma-separated source exclude filter (e.g., 'intaris')",
+    ),
+    data_source: str | None = Query(
+        None,
+        description="Comma-separated payload source filter on event.data.source",
+    ),
+    turn_id: str | None = Query(
+        None,
+        description="Return events with event.data.turn_id matching this value",
+    ),
+    min_position: int | None = Query(
+        None,
+        ge=0,
+        description="Return events with event.data.position >= this value",
+    ),
+    max_position: int | None = Query(
+        None,
+        ge=0,
+        description="Return events with event.data.position <= this value",
+    ),
+    after_ts: str | None = Query(
+        None,
+        description="Return events with ts >= this ISO 8601 timestamp",
+    ),
+    before_ts: str | None = Query(
+        None,
+        description="Return events with ts <= this ISO 8601 timestamp",
+    ),
+) -> JSONResponse:
+    """Export a single session snapshot as JSON."""
+    event_store = _get_event_store(request)
+
+    if (
+        min_position is not None
+        and max_position is not None
+        and min_position > max_position
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="min_position must be <= max_position",
+        )
+
+    event_types, event_sources, event_exclude_sources, event_data_sources = (
+        _parse_event_filters(
+            type=type,
+            source=source,
+            exclude_source=exclude_source,
+            data_source=data_source,
+        )
+    )
+
+    session = _get_session_or_404(ctx.user_id, session_id)
+    event_last_seq = event_store.last_seq(ctx.user_id, session_id)
+    filters = _export_filter_metadata(
+        type=type,
+        source=source,
+        exclude_source=exclude_source,
+        data_source=data_source,
+        turn_id=turn_id,
+        min_position=min_position,
+        max_position=max_position,
+        after_ts=after_ts,
+        before_ts=before_ts,
+    )
+
+    try:
+        events = event_store.read(
+            ctx.user_id,
+            session_id,
+            after_seq=0,
+            limit=0,
+            event_types=event_types,
+            sources=event_sources,
+            exclude_sources=event_exclude_sources,
+            data_sources=event_data_sources,
+            turn_id=turn_id,
+            min_position=min_position,
+            max_position=max_position,
+            after_ts=after_ts,
+            before_ts=before_ts,
+        )
+        events = [event for event in events if event.get("seq", 0) <= event_last_seq]
+        audit_log = _get_export_audit_log(ctx.user_id, session_id)
+        summaries = _get_export_summaries(ctx.user_id, session_id)
+    except Exception as e:
+        logger.exception("Failed to export events for %s/%s", ctx.user_id, session_id)
+        raise HTTPException(status_code=500, detail=f"Failed to export events: {e}")
+
+    payload = {
+        "schema": "intaris.session_export.v1",
+        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "session_id": session_id,
+        "user_id": ctx.user_id,
+        "complete": not bool(filters),
+        "filters": filters,
+        "event_last_seq": event_last_seq,
+        "event_count": len(events),
+        "audit_count": len(audit_log),
+        "session_summary_count": len(summaries["session_summaries"]),
+        "agent_summary_count": len(summaries["agent_summaries"]),
+        "consistency": "events_bounded_to_event_last_seq",
+        "session": session,
+        "events": events,
+        "audit_log": audit_log,
+        **summaries,
+    }
+
+    safe_session_id = re.sub(r"[^a-zA-Z0-9._-]+", "-", session_id).strip("-")
+    filename = f"intaris-session-{safe_session_id or 'session'}-events.json"
+    return JSONResponse(
+        content=payload,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

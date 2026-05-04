@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import time
 from unittest.mock import patch
@@ -406,6 +407,216 @@ class TestSessions:
 
 class TestSessionEvents:
     """Tests for session event recording endpoints."""
+
+    def test_export_events_includes_session_metadata(self, client_no_auth):
+        headers = {
+            "X-User-Id": "events-export-user",
+            "X-Agent-Id": "agent-export",
+            "X-Intaris-Source": "opencode",
+        }
+        _create_session(client_no_auth, "sess-events-export", headers)
+
+        append = client_no_auth.post(
+            "/api/v1/session/sess-events-export/events",
+            json=[
+                {"type": "message", "data": {"role": "user", "text": "hello"}},
+                {
+                    "type": "tool_call",
+                    "data": {"tool": "read", "args": {"filePath": "README.md"}},
+                },
+            ],
+            headers=headers,
+        )
+        assert append.status_code == 200
+
+        from intaris.server import _get_db
+
+        db = _get_db()
+        with db.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO audit_log
+                    (id, call_id, record_type, user_id, session_id, agent_id,
+                     timestamp, tool, args_redacted, content, classification,
+                     evaluation_path, decision, risk, reasoning, latency_ms,
+                     args_hash, profile_version, intention, injection_detected)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "audit-export-1",
+                    "call-export-1",
+                    "tool_call",
+                    "events-export-user",
+                    "sess-events-export",
+                    "agent-export",
+                    "2026-01-01T00:00:00Z",
+                    "read",
+                    json.dumps({"filePath": "README.md"}),
+                    None,
+                    "read",
+                    "fast",
+                    "approve",
+                    "low",
+                    "read-only",
+                    1,
+                    "hash-export-1",
+                    7,
+                    "Test session for unit tests",
+                    0,
+                ),
+            )
+            cur.execute(
+                """
+                INSERT INTO session_summaries
+                    (id, user_id, session_id, window_start, window_end, trigger,
+                     summary_type, summary, tools_used, intent_alignment,
+                     risk_indicators, call_count, approved_count, denied_count,
+                     escalated_count, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "summary-export-1",
+                    "events-export-user",
+                    "sess-events-export",
+                    "2026-01-01T00:00:00Z",
+                    "2026-01-01T00:01:00Z",
+                    "manual",
+                    "window",
+                    "Session summary",
+                    json.dumps(["read"]),
+                    "aligned",
+                    json.dumps([{"indicator": "scope_creep", "severity": 2}]),
+                    1,
+                    1,
+                    0,
+                    0,
+                    "2026-01-01T00:02:00Z",
+                ),
+            )
+            cur.execute(
+                """
+                INSERT INTO agent_summaries
+                    (id, user_id, session_id, summary, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "agent-summary-export-1",
+                    "events-export-user",
+                    "sess-events-export",
+                    "Agent summary",
+                    "2026-01-01T00:03:00Z",
+                ),
+            )
+
+        export = client_no_auth.get(
+            "/api/v1/session/sess-events-export/events/export",
+            headers=headers,
+        )
+        assert export.status_code == 200
+        assert export.headers["content-disposition"].startswith("attachment;")
+        payload = export.json()
+        assert payload["schema"] == "intaris.session_export.v1"
+        assert payload["complete"] is True
+        assert payload["filters"] == {}
+        assert payload["event_last_seq"] >= 3
+        assert payload["event_count"] == len(payload["events"])
+        assert payload["audit_count"] == 1
+        assert payload["session_summary_count"] == 1
+        assert payload["agent_summary_count"] == 1
+        assert payload["consistency"] == "events_bounded_to_event_last_seq"
+        assert payload["session"]["session_id"] == "sess-events-export"
+        assert payload["session"]["user_id"] == "events-export-user"
+        assert payload["session"]["agent_id"] == "agent-export"
+        assert [event["type"] for event in payload["events"]][-2:] == [
+            "message",
+            "tool_call",
+        ]
+        assert payload["audit_log"][0]["args_redacted"] == {"filePath": "README.md"}
+        assert payload["audit_log"][0]["args_hash"] == "hash-export-1"
+        assert payload["audit_log"][0]["profile_version"] == 7
+        assert payload["session_summaries"][0]["tools_used"] == ["read"]
+        assert payload["session_summaries"][0]["risk_indicators"] == [
+            {"indicator": "scope_creep", "severity": 2}
+        ]
+        assert payload["agent_summaries"][0]["summary"] == "Agent summary"
+
+    def test_export_events_applies_event_filters_only(self, client_no_auth):
+        headers = {
+            "X-User-Id": "events-export-filter-user",
+            "X-Agent-Id": "agent-export",
+            "X-Intaris-Source": "cognis",
+        }
+        _create_session(client_no_auth, "sess-events-export-filter", headers)
+
+        append = client_no_auth.post(
+            "/api/v1/session/sess-events-export-filter/events",
+            json=[
+                {
+                    "type": "user_message",
+                    "data": {"content": "hello", "source": "chat", "turn_id": "turn-1"},
+                },
+                {
+                    "type": "assistant_message",
+                    "data": {
+                        "content": "reply",
+                        "source": "assistant_reply",
+                        "turn_id": "turn-1",
+                    },
+                },
+            ],
+            headers=headers,
+        )
+        assert append.status_code == 200
+
+        from intaris.server import _get_db
+
+        with _get_db().cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO audit_log
+                    (id, call_id, record_type, user_id, session_id, agent_id,
+                     timestamp, tool, args_redacted, content, classification,
+                     evaluation_path, decision, risk, reasoning, latency_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "audit-export-filter-1",
+                    "call-export-filter-1",
+                    "tool_call",
+                    "events-export-filter-user",
+                    "sess-events-export-filter",
+                    "agent-export",
+                    "2026-01-01T00:00:00Z",
+                    "read",
+                    json.dumps({"filePath": "README.md"}),
+                    None,
+                    "read",
+                    "fast",
+                    "approve",
+                    "low",
+                    "read-only",
+                    1,
+                ),
+            )
+
+        export = client_no_auth.get(
+            "/api/v1/session/sess-events-export-filter/events/export"
+            "?type=assistant_message&data_source=assistant_reply&turn_id=turn-1",
+            headers=headers,
+        )
+        assert export.status_code == 200
+        payload = export.json()
+        assert payload["complete"] is False
+        assert payload["filters"] == {
+            "type": ["assistant_message"],
+            "data_source": ["assistant_reply"],
+            "turn_id": "turn-1",
+        }
+        assert [event["type"] for event in payload["events"]] == [
+            "assistant_message"
+        ]
+        assert len(payload["audit_log"]) == 1
+        assert payload["audit_log"][0]["call_id"] == "call-export-filter-1"
 
     def test_read_events_last_n(self, client_no_auth):
         headers = {"X-User-Id": "events-user", "X-Agent-Id": "agent-1"}

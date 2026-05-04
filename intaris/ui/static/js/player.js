@@ -34,6 +34,7 @@ function sessionPlayer() {
     lastSeq: 0,
     hasMore: false,
     loading: false,
+    exporting: false,
     error: null,
     visible: false,
 
@@ -106,6 +107,24 @@ function sessionPlayer() {
     },
 
     /**
+     * Build API params from the current UI filters.
+     */
+    _filterParams() {
+      const params = {};
+      if (this.typeFilter !== '__all__') params.type = this.typeFilter;
+      if (this.sourceFilter === '__agent__') {
+        params.exclude_source = 'intaris';
+      } else if (this.sourceFilter !== '__all__') {
+        params.source = this.sourceFilter;
+      }
+      if (this.dataSourceFilter.trim()) params.data_source = this.dataSourceFilter.trim();
+      if (this.turnIdFilter.trim()) params.turn_id = this.turnIdFilter.trim();
+      if (this.afterTs) params.after_ts = this._toISOString(this.afterTs);
+      if (this.beforeTs) params.before_ts = this._toISOString(this.beforeTs);
+      return params;
+    },
+
+    /**
      * Load events from the API.
      */
     async loadEvents() {
@@ -115,19 +134,10 @@ function sessionPlayer() {
 
       try {
         const params = {
+          ...this._filterParams(),
           after_seq: this.lastSeq,
           limit: this.pageSize,
         };
-        if (this.typeFilter !== '__all__') params.type = this.typeFilter;
-        if (this.sourceFilter === '__agent__') {
-          params.exclude_source = 'intaris';
-        } else if (this.sourceFilter !== '__all__') {
-          params.source = this.sourceFilter;
-        }
-        if (this.dataSourceFilter.trim()) params.data_source = this.dataSourceFilter.trim();
-        if (this.turnIdFilter.trim()) params.turn_id = this.turnIdFilter.trim();
-        if (this.afterTs) params.after_ts = this._toISOString(this.afterTs);
-        if (this.beforeTs) params.before_ts = this._toISOString(this.beforeTs);
 
         const result = await IntarisAPI.getSessionEvents(this.sessionId, params);
         const newEvents = result.events || [];
@@ -152,6 +162,37 @@ function sessionPlayer() {
       }
 
       if (this.autoScroll) this.scrollToBottom();
+    },
+
+    /**
+     * Export all events matching the current filters plus session metadata.
+     */
+    async exportEvents() {
+      if (!this.sessionId || this.exporting) return;
+      this.exporting = true;
+      this.error = null;
+
+      try {
+        const { blob, filename } = await IntarisAPI.exportSessionEvents(
+          this.sessionId,
+          this._filterParams(),
+        );
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        if (window.Alpine) {
+          Alpine.store('notify')?.success('Session events export started');
+        }
+      } catch (e) {
+        this.error = 'Failed to export events: ' + e.message;
+      } finally {
+        this.exporting = false;
+      }
     },
 
     /**

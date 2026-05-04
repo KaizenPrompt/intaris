@@ -3107,9 +3107,26 @@
           </select>
         </div>
 
-        <div class="text-xs text-muted">
-          <span x-text="eventCount"></span> events
-          <span x-show="hasMore"> (more available)</span>
+        <div class="flex items-center gap-2">
+          <button @click.stop="exportEvents()"
+                  class="btn-secondary text-xs p-1.5"
+                  :disabled="exporting"
+                  title="Export events JSON"
+                  aria-label="Export events JSON">
+            <svg x-show="!exporting" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            <svg x-show="exporting" class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+          </button>
+          <div class="text-xs text-muted">
+            <span x-text="eventCount"></span> events
+            <span x-show="hasMore"> (more available)</span>
+          </div>
         </div>
       </div>
 

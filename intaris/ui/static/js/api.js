@@ -239,14 +239,7 @@ const IntarisAPI = {
 
   // ── Session Events (Recording) ──────────────────────────────
 
-  /**
-   * Read events from a session's event log.
-   * @param {string} sessionId
-   * @param {Object} params - { after_seq, limit, last_n, type, source,
-   *   exclude_source, data_source, turn_id, min_position, max_position,
-   *   after_ts, before_ts }
-   */
-  getSessionEvents(sessionId, params = {}) {
+  _sessionEventsQuery(params = {}) {
     const qs = new URLSearchParams();
     if (params.after_seq) qs.set('after_seq', params.after_seq);
     if (params.limit) qs.set('limit', params.limit);
@@ -260,8 +253,52 @@ const IntarisAPI = {
     if (params.max_position != null) qs.set('max_position', params.max_position);
     if (params.after_ts) qs.set('after_ts', params.after_ts);
     if (params.before_ts) qs.set('before_ts', params.before_ts);
-    const query = qs.toString();
+    return qs.toString();
+  },
+
+  /**
+   * Read events from a session's event log.
+   * @param {string} sessionId
+   * @param {Object} params - { after_seq, limit, last_n, type, source,
+   *   exclude_source, data_source, turn_id, min_position, max_position,
+   *   after_ts, before_ts }
+   */
+  getSessionEvents(sessionId, params = {}) {
+    const query = this._sessionEventsQuery(params);
     return this.get(`/session/${encodeURIComponent(sessionId)}/events${query ? '?' + query : ''}`);
+  },
+
+  /**
+   * Export a reconstructable session event snapshot as a JSON attachment.
+   * @param {string} sessionId
+   * @param {Object} params - Same filters as getSessionEvents, excluding pagination.
+   */
+  async exportSessionEvents(sessionId, params = {}) {
+    const query = this._sessionEventsQuery(params);
+    const path = `/session/${encodeURIComponent(sessionId)}/events/export${query ? '?' + query : ''}`;
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      headers: this._headers(),
+    });
+
+    if (response.status === 401) {
+      if (window.Alpine) {
+        const store = Alpine.store('auth');
+        if (store) store.logout();
+      }
+      throw new Error('Unauthorized');
+    }
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+    }
+
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+    return {
+      blob: await response.blob(),
+      filename: filenameMatch?.[1] || `intaris-session-${sessionId}-events.json`,
+    };
   },
 
   /**
