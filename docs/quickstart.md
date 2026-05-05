@@ -119,6 +119,33 @@ For semantic / multilingual recall the optional vector tier adds
 either pgvector (dense embeddings, Postgres-only) or **Qdrant native
 dense + sparse hybrid** (works with any backend).
 
+### What you get with each mode
+
+| Capability | Default (lexical only) | + Vector tier enabled |
+|---|---|---|
+| Token / phrase match | Yes | Yes |
+| Diacritic-insensitive match | Yes | Yes |
+| Typo / fuzzy / partial-word | Limited (PG `pg_trgm` if installed) | Yes |
+| Synonym / paraphrase recall | No | Yes |
+| Multilingual (query EN, content CS, ...) | No | Yes (with a multilingual embedding model) |
+| Required infrastructure | None — uses your existing DB | Postgres + `pgvector`, OR Qdrant (server URL or local-mode path) |
+| Embedding API key | Not needed | Required |
+| Per-write cost | Zero (PG generated columns) | One embedding call per audit / summary write |
+| Per-query cost | Single SQL query | Embedding call + vector search + fusion |
+| Storage overhead | Small (`tsvector`) or none (SQLite) | Dense vectors at `dim x 4` bytes per row |
+| Backfill on enable | Not needed | One-time walk of audit_log + summaries |
+
+### Provider comparison
+
+| Aspect | `disabled` (default) | `pgvector` | `qdrant` |
+|---|---|---|---|
+| DB requirement | Any (PG or SQLite) | **Postgres only** | Any (PG or SQLite) |
+| Extra service | None | None — runs inside Postgres | Qdrant when URL-mode; **none** in local-mode |
+| Vector flavor | n/a | Dense only | **Dense + sparse** native hybrid |
+| Token recall | Lexical only | PG lexical RRF-fused with vector | Qdrant sparse BM25 server-side fused with dense |
+| Best for | Cheap defaults, single-user quickstart | Postgres deployments wanting semantic recall without a new service | Multilingual / paraphrase-heavy content; serverless single-user (local-mode) or multi-tenant (server URL) |
+| Install | built in | built in (needs `vector` extension on PG) | `pip install intaris[search-qdrant]` |
+
 ### Single-user / quickstart with serverless Qdrant
 
 The simplest production-quality setup pairs Intaris on SQLite with

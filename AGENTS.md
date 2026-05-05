@@ -1134,6 +1134,44 @@ Three search kinds covering "find that session" / "what was this session about" 
 
 The event store and raw user/assistant messages are intentionally NOT searched. Lexical search reads canonical tables directly via tsvector — there is no projection table or write-time indexer hook for the lexical tier.
 
+### Default lexical search vs. vector search enabled
+
+| Capability | Default (lexical only) | + Vector tier enabled |
+|---|---|---|
+| Token / phrase match | Yes — Postgres `tsvector` BM25-ish ranking; SQLite `LIKE` | Yes — same lexical tier (pgvector) or Qdrant sparse BM25 (qdrant) |
+| Diacritic-insensitive match | Yes — `unaccent` on PG when available; `intaris_fold` UDF on SQLite | Yes — same |
+| Typo / fuzzy / partial-word | Limited — `pg_trgm` similarity fallback on PG only when extension is enabled; not available on SQLite | Yes — vector embeddings cover paraphrase; sparse BM25 covers tokens |
+| Synonym / paraphrase recall | No | Yes — dense embeddings collapse synonyms server-side |
+| Multilingual recall (query in one language, content in another) | No | Yes — with a multilingual embedding model (`bge-m3`, `multilingual-e5`, OpenAI `text-embedding-3-*`) |
+| Required infrastructure | None — uses existing Postgres or SQLite | Postgres + `pgvector` extension, OR Qdrant (server URL or local-mode path) |
+| Embedding API key | Not needed | Required (`INTARIS_SEARCH_EMBEDDING_*`) |
+| Per-write cost | Zero — generated columns update automatically | One embedding call per audit / summary write (batched, async) |
+| Per-query cost | Single SQL query | Embedding call for the query + vector search + fusion |
+| Storage overhead | Small — `tsvector` columns roughly 1.5x source text on PG; nothing extra on SQLite | Dense vectors at `dim x 4` bytes per row plus HNSW index (PG) or one Qdrant point per row |
+| Backfill required on enable | None | One-time walk of `audit_log` + summaries, queued through `search_outbox` |
+| Cold-start behavior | Works immediately on existing data | Empty until backfill drains; lexical tier still serves results in the meantime |
+
+The two tiers compose. With `pgvector`, every query runs both PG
+lexical and pgvector cosine and the orchestrator RRF-fuses them.
+With `qdrant`, the dense+sparse hybrid runs server-side and PG
+lexical is bypassed because Qdrant's sparse vector covers the
+lexical role.
+
+### Vector tier provider comparison
+
+| Aspect | `disabled` (default) | `pgvector` | `qdrant` |
+|---|---|---|---|
+| Backend | n/a | Postgres `vector` extension | Qdrant (server URL or local-mode path) |
+| DB requirement | Any (PG or SQLite) | **Postgres only** | Any (PG or SQLite) |
+| Extra service | None | None — runs inside Postgres | Qdrant when in URL mode; **none** in local-mode (embedded, SQLite-backed) |
+| Vector flavor | n/a | Dense only | **Dense + sparse** native hybrid |
+| Token recall | PG/SQLite lexical | PG lexical (RRF-fused with vector) | Qdrant sparse BM25 (server-side fused with dense) |
+| Semantic recall | None | Dense embeddings | Dense embeddings |
+| Sparse model | n/a | n/a | FastEmbed `Qdrant/bm25` (local, no inference call) |
+| Fusion | n/a | Python RRF combining PG lexical + pgvector | Server-side RRF in Qdrant Query API |
+| Best for | Cheap defaults, ASCII-heavy content, single-user quickstart | Postgres deployments wanting semantic recall without a new service | Multilingual / paraphrase-heavy content; single-user via local-mode or multi-tenant via server URL |
+| Install command | built in | built in (needs `vector` extension on PG) | `pip install intaris[search-qdrant]` |
+
 ### Lexical tier (always available)
 
 - **Postgres**: generated `tsvector` columns added to `sessions`, `audit_log`, `session_summaries`, `agent_summaries`. Partial GIN indexes scope to the rows we search (e.g. `audit_log` only indexes rows where `record_type IN ('reasoning','checkpoint')`). `unaccent` and `pg_trgm` extensions probed at startup with graceful fallback.

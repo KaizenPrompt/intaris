@@ -569,6 +569,25 @@ only) or Qdrant (native dense+sparse hybrid).
 The master flag is `INTARIS_SEARCH_ENABLED`; when off, every endpoint in
 this section returns 404.
 
+### Search kinds
+
+| Kind | Source | Notes |
+|---|---|---|
+| `summary` | `session_summaries` (window + compacted) ∪ `agent_summaries` | Highest-signal, LLM-distilled. Few rows per session. May not exist for new sessions. |
+| `intention` | `audit_log.intention` deduped per session | Always present once a session has any tool calls. LLM-rewritten English. |
+| `reasoning` | `audit_log.content` where `record_type IN ('reasoning','checkpoint')` | Includes user messages (`User message: ...` prefix) and agent reasoning, distinguished by the `role` field on each match. |
+
+### Default lexical vs vector tier enabled
+
+| Capability | Default (lexical only) | + Vector tier enabled |
+|---|---|---|
+| Token / phrase match | Yes | Yes |
+| Synonym / paraphrase recall | No | Yes |
+| Multilingual recall | No | Yes (with a multilingual embedding model) |
+| Per-write cost | Zero | One embedding call per audit / summary write |
+| Per-query cost | Single SQL query | Embedding call + vector search + fusion |
+| Backfill on enable | Not needed | One-time walk of audit_log + summaries |
+
 ### POST /search
 
 Flat match list with snippets.
