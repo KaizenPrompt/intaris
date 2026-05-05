@@ -416,4 +416,30 @@ const IntarisAPI = {
     ws.onerror = onError || null;
     return ws;
   },
+
+  // ── Search ───────────────────────────────────────────────────────
+
+  async getSearchHealth() {
+    return this.get('/search/health');
+  },
+
+  async getSearchConfig() {
+    return this.get('/search/config');
+  },
+
+  async searchMatches(body) {
+    return this.post('/search', body);
+  },
+
+  async searchSessions(body) {
+    return this.post('/search/sessions', body);
+  },
+
+  async triggerSearchReindex() {
+    return this.post('/search/reindex', {});
+  },
+
+  async getSearchReindexStatus(jobId) {
+    return this.get(`/search/reindex/${encodeURIComponent(jobId)}`);
+  },
 };

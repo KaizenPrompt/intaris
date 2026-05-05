@@ -583,7 +583,7 @@ document.addEventListener('alpine:init', () => {
       const params = new URLSearchParams(window.location.search);
       const requestedTab = params.get('tab');
       const sessionId = params.get('session_id');
-      const validTabs = ['dashboard', 'sessions', 'audit', 'approvals', 'analysis', 'servers', 'settings'];
+      const validTabs = ['dashboard', 'sessions', 'search', 'audit', 'approvals', 'analysis', 'servers', 'settings'];
 
       if (sessionId) {
         this.setTab('sessions');

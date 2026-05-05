@@ -14,6 +14,7 @@
   <script src="/ui/js/app.js"></script>
   <script src="/ui/js/dashboard.js"></script>
   <script src="/ui/js/sessions.js"></script>
+  <script src="/ui/js/search.js"></script>
   <script src="/ui/js/player.js"></script>
   <script src="/ui/js/console-player.js"></script>
   <script src="/ui/js/audit.js"></script>
@@ -93,6 +94,7 @@
             <template x-for="tab in [
               { id: 'dashboard', label: 'Dashboard' },
               { id: 'sessions', label: 'Sessions' },
+              { id: 'search', label: 'Search' },
               { id: 'audit', label: 'Audit' },
               { id: 'approvals', label: 'Approvals' },
               { id: 'analysis', label: 'Analysis' },
@@ -865,6 +867,158 @@
           <button @click="prevPage()" :disabled="page <= 1" class="btn-secondary text-sm">Previous</button>
           <span class="text-sm text-muted" x-text="`Page ${page} of ${pages}`"></span>
           <button @click="nextPage()" :disabled="page >= pages" class="btn-secondary text-sm">Next</button>
+        </div>
+      </div>
+
+      <!-- Search Tab -->
+      <div x-show="$store.nav.activeTab === 'search'" x-data="searchTab()" x-init="init()">
+
+        <!-- Disabled banner -->
+        <template x-if="health && !health.enabled">
+          <div class="card mb-4 border-l-4 border-yellow-500/60 bg-yellow-500/5">
+            <div class="text-sm">
+              <span class="font-semibold text-yellow-300">Search is disabled.</span>
+              <span class="text-secondary">Set <code class="text-xs">INTARIS_SEARCH_ENABLED=true</code> to enable conversation search.</span>
+            </div>
+          </div>
+        </template>
+
+        <!-- Backend status chip + filters -->
+        <div class="card mb-4">
+          <div class="flex flex-wrap items-center gap-3 mb-3">
+            <div class="flex items-center gap-2 text-xs text-muted">
+              <span class="font-semibold text-secondary">Lexical:</span>
+              <code x-text="health?.lexical?.backend || '-'" class="px-1.5 py-0.5 rounded bg-brand-bg/40"></code>
+              <span class="font-semibold text-secondary">Vector:</span>
+              <code x-text="health?.vector?.provider || 'disabled'" class="px-1.5 py-0.5 rounded bg-brand-bg/40"></code>
+              <template x-if="health?.vector?.model">
+                <span class="text-muted">(model: <span x-text="health.vector.model"></span>, dim: <span x-text="health.vector.dim"></span>)</span>
+              </template>
+              <template x-if="health?.vector?.queue_depth > 0">
+                <span class="text-amber-300">Queue: <span x-text="health.vector.queue_depth"></span></span>
+              </template>
+              <template x-if="health?.vector?.backfill_status === 'running'">
+                <span class="text-blue-300">
+                  Reindexing: <span x-text="health.vector.backfill_processed || 0"></span> / <span x-text="health.vector.backfill_total || 0"></span>
+                </span>
+              </template>
+            </div>
+          </div>
+
+          <form @submit.prevent="run()" class="grid grid-cols-1 md:grid-cols-6 gap-3">
+            <input x-model="q" placeholder="Search summaries, intentions, reasoning..."
+                   class="input text-sm md:col-span-3" autofocus>
+            <select x-model="mode" class="select text-sm">
+              <option value="auto">Auto</option>
+              <option value="lexical">Lexical only</option>
+              <option value="vector">Vector only</option>
+              <option value="hybrid">Hybrid</option>
+            </select>
+            <select x-model="view" class="select text-sm">
+              <option value="sessions">Group by session</option>
+              <option value="matches">Flat matches</option>
+            </select>
+            <button type="submit" class="btn-primary text-sm" :disabled="loading || !q.trim() || (health && !health.enabled)">
+              <span x-show="!loading">Search</span>
+              <span x-show="loading">Searching...</span>
+            </button>
+          </form>
+
+          <details class="mt-3">
+            <summary class="text-xs text-muted cursor-pointer">Advanced filters</summary>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
+              <input x-model="filterAgentId" placeholder="Agent ID"
+                     class="input text-xs">
+              <input x-model="filterSessionId" placeholder="Session ID"
+                     class="input text-xs">
+              <input x-model="filterFromTs" type="datetime-local"
+                     placeholder="From"
+                     class="input text-xs">
+              <input x-model="filterToTs" type="datetime-local"
+                     placeholder="To"
+                     class="input text-xs">
+              <div class="md:col-span-4 flex flex-wrap gap-2">
+                <template x-for="kind in availableKinds" :key="kind">
+                  <label class="inline-flex items-center gap-1.5 text-xs text-secondary">
+                    <input type="checkbox" :value="kind"
+                           :checked="filterKinds.includes(kind)"
+                           @change="toggleKind(kind)"
+                           class="checkbox">
+                    <span x-text="kind"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <!-- Mode used / degraded notice -->
+        <template x-if="lastResponse?.backend">
+          <div class="text-xs text-muted mb-3">
+            Mode used: <code x-text="lastResponse.backend.mode_used"></code>
+            <template x-if="degradedReason">
+              <span class="text-amber-300 ml-2">(degraded: <span x-text="degradedReason"></span>)</span>
+            </template>
+          </div>
+        </template>
+
+        <!-- Empty / loading -->
+        <div x-show="loading && !sessions.length && !matches.length" class="text-center py-12 text-secondary">Searching...</div>
+        <div x-show="!loading && submitted && sessions.length === 0 && matches.length === 0"
+             class="text-center py-12 text-secondary">
+          No matches.
+        </div>
+
+        <!-- Grouped-by-session view -->
+        <div x-show="view === 'sessions' && sessions.length > 0" class="space-y-3">
+          <template x-for="s in sessions" :key="s.session_id">
+            <div class="card hover:ring-1 hover:ring-brand-accent/30 transition-all cursor-pointer"
+                 @click="$store.nav.openSessionModal(s.session_id)">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="font-semibold truncate" x-text="s.title || s.session_id"></div>
+                  <div class="text-xs text-muted truncate" x-text="s.intention || ''"></div>
+                  <div class="text-xs text-muted mt-1">
+                    <span x-show="s.agent_id"><code x-text="s.agent_id"></code> · </span>
+                    <span x-text="s.match_count"></span> match<span x-show="s.match_count !== 1">es</span>
+                    · <span x-text="s.top_match?.kind || ''"></span>
+                  </div>
+                </div>
+                <div class="text-xs text-muted shrink-0" x-text="s.last_activity_at ? new Date(s.last_activity_at).toLocaleString() : ''"></div>
+              </div>
+              <template x-if="s.top_match?.snippet">
+                <div class="mt-2 text-sm text-secondary search-snippet" x-html="renderSnippet(s.top_match.snippet)"></div>
+              </template>
+            </div>
+          </template>
+        </div>
+
+        <!-- Flat matches view -->
+        <div x-show="view === 'matches' && matches.length > 0" class="space-y-2">
+          <template x-for="(m, idx) in matches" :key="m.session_id + ':' + (m.ref_id || 'field') + ':' + idx">
+            <div class="card hover:ring-1 hover:ring-brand-accent/30 transition-all cursor-pointer"
+                 @click="$store.nav.openSessionModal(m.session_id)">
+              <div class="flex items-start justify-between gap-3 mb-1">
+                <div class="text-xs text-muted">
+                  <code x-text="m.session_id" class="px-1 py-0.5 rounded bg-brand-bg/40"></code>
+                  · <span x-text="m.kind"></span>
+                  <span x-show="m.role"> · <span x-text="m.role"></span></span>
+                </div>
+                <div class="text-xs text-muted" x-text="m.ts ? new Date(m.ts).toLocaleString() : ''"></div>
+              </div>
+              <div class="text-sm text-secondary search-snippet" x-html="renderSnippet(m.snippet || '')"></div>
+            </div>
+          </template>
+        </div>
+
+        <!-- Pagination -->
+        <div x-show="(view === 'sessions' && sessions.length > 0) || (view === 'matches' && matches.length > 0)"
+             class="flex items-center justify-center gap-3 mt-4">
+          <button @click="loadMore()" :disabled="!nextCursor || loading"
+                  class="btn-secondary text-sm">
+            <span x-show="!loading">Load more</span>
+            <span x-show="loading">Loading...</span>
+          </button>
         </div>
       </div>
 
@@ -2019,6 +2173,81 @@
                   <div class="text-xs text-muted">Timeout</div>
                   <div x-text="config.llm.timeout_ms + 'ms'"></div>
                 </div>
+              </div>
+            </div>
+
+            <!-- Search -->
+            <div class="card" x-data="searchSettings()" x-init="init()">
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="text-sm font-medium text-secondary">Search</h3>
+                <span class="text-xs"
+                      :class="searchHealth?.enabled ? 'text-emerald-400' : 'text-muted'">
+                  <span x-text="searchHealth?.enabled ? 'Enabled' : 'Disabled'"></span>
+                </span>
+              </div>
+              <p class="text-xs text-muted mb-3">
+                Conversation search across summaries, intentions, and reasoning.
+                Lexical tier (Postgres tsvector / SQLite LIKE) is always
+                available; the optional vector tier (pgvector or Qdrant
+                native dense+sparse hybrid) adds semantic recall.
+              </p>
+              <template x-if="searchHealth">
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <div class="text-xs text-muted">Lexical backend</div>
+                    <div class="font-mono" x-text="searchHealth.lexical?.backend || '-'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Vector provider</div>
+                    <div class="font-mono" x-text="searchHealth.vector?.provider || 'disabled'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Embedding model</div>
+                    <div class="font-mono" x-text="searchHealth.vector?.model || '-'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Embedding dim</div>
+                    <div x-text="searchHealth.vector?.dim || '-'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Sparse model</div>
+                    <div class="font-mono" x-text="searchHealth.vector?.sparse_model || '-'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Indexer queue depth</div>
+                    <div x-text="searchHealth.vector?.queue_depth || 0"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Last index at</div>
+                    <div x-text="searchHealth.vector?.last_index_at ? new Date(searchHealth.vector.last_index_at).toLocaleString() : '-'"></div>
+                  </div>
+                </div>
+              </template>
+
+              <template x-if="searchHealth?.notes && searchHealth.notes.length > 0">
+                <div class="mt-3 text-xs text-amber-300 space-y-1">
+                  <template x-for="(n, idx) in searchHealth.notes" :key="idx">
+                    <div>• <span x-text="n"></span></div>
+                  </template>
+                </div>
+              </template>
+
+              <div class="mt-4 flex items-center gap-3">
+                <button class="btn-secondary text-sm"
+                        :disabled="!searchHealth?.enabled || searchHealth?.vector?.provider === 'disabled' || reindexing"
+                        @click="triggerReindex()">
+                  <span x-show="!reindexing">Reindex now</span>
+                  <span x-show="reindexing">Reindexing...</span>
+                </button>
+                <template x-if="searchHealth?.vector?.backfill_status === 'running'">
+                  <span class="text-xs text-blue-300">
+                    Reindexing: <span x-text="searchHealth.vector.backfill_processed || 0"></span> /
+                    <span x-text="searchHealth.vector.backfill_total || 0"></span>
+                  </span>
+                </template>
+                <template x-if="searchHealth?.vector?.backfill_status === 'failed'">
+                  <span class="text-xs text-red-400">Last reindex failed.</span>
+                </template>
               </div>
             </div>
 

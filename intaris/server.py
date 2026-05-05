@@ -588,6 +588,29 @@ async def lifespan(app):
         app.state.event_store = None
         logger.info("Event store disabled")
 
+    # Initialize search subsystem. Lexical tier (PG tsvector / SQLite
+    # LIKE) is always available when the master flag is on; the vector
+    # tier is optional and turns on automatically when configured.
+    from intaris.search.service import SearchService
+
+    search_service = SearchService(db=_get_db(), config=cfg.search)
+    app.state.search_service = search_service
+    if cfg.search.enabled:
+        logger.info(
+            "Search initialized (lexical=%s, vector=%s)",
+            search_service.lexical_backend,
+            search_service.vector_backend_name,
+        )
+        # Wire search hooks so audit/summary writers fan out into the
+        # vector indexer when the vector tier is enabled.
+        from intaris import analyzer as _analyzer
+        from intaris.audit import AuditStore as _AuditStore
+
+        _AuditStore.set_search_service(search_service)
+        _analyzer.set_search_service(search_service)
+    else:
+        logger.info("Search disabled (INTARIS_SEARCH_ENABLED=false)")
+
     # Initialize background worker for behavioral analysis
     from intaris.background import BackgroundWorker, TaskQueue
 
@@ -693,6 +716,7 @@ async def lifespan(app):
         api_app.state.notification_dispatcher = notification_dispatcher
         api_app.state.event_store = app.state.event_store
         api_app.state.judge_reviewer = app.state.judge_reviewer
+        api_app.state.search_service = app.state.search_service
 
     mcp_session_stop = None
     mcp_session_task = None
@@ -724,6 +748,11 @@ async def lifespan(app):
             app.state.mcp_session_manager_task = None
             app.state.mcp_session_manager_ready = None
 
+        # Start the search indexer worker (no-op when search disabled
+        # or vector tier disabled).
+        with contextlib.suppress(Exception):
+            await search_service.start()
+
         yield
     except (asyncio.CancelledError, KeyboardInterrupt):
         logger.info("Shutdown interrupted — running cleanup")
@@ -747,6 +776,10 @@ async def lifespan(app):
                 logger.warning("MCP proxy shutdown timed out (5s)")
             except asyncio.CancelledError:
                 pass
+
+        # Stop search indexer worker (3s timeout per service)
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await asyncio.wait_for(search_service.stop(), timeout=3.0)
 
         # Flush event store buffers (synchronous — fast)
         if app.state.event_store is not None:

@@ -51,6 +51,18 @@ from intaris.db import Database
 
 logger = logging.getLogger(__name__)
 
+
+# Optional SearchService handle, set by the server lifespan once both
+# services are ready. When present, every successful summary write
+# fans out into the vector indexer. Best-effort.
+_search_service: Any = None
+
+
+def set_search_service(service: Any) -> None:
+    global _search_service
+    _search_service = service
+
+
 # ── Budget-aware windowing constants ──────────────────────────────────
 # Target max chars per window user prompt.  The partitioner splits data
 # into context-budget-aware windows; no content is ever silently dropped.
@@ -1271,6 +1283,26 @@ def _store_summary(
             "WHERE user_id = ? AND session_id = ?",
             (alignment, user_id, session_id),
         )
+
+    # Fan out to the search indexer (vector tier). Lexical search
+    # reads canonical session_summaries directly via tsvector — no
+    # write needed for that.
+    if _search_service is not None and summary_text:
+        try:
+            _search_service.enqueue_summary(
+                user_id=user_id,
+                session_id=session_id,
+                agent_id=None,
+                ref_id=summary_id,
+                summary=summary_text,
+                ts=now,
+            )
+        except Exception:
+            logger.exception(
+                "Search indexer enqueue failed for summary user=%s session=%s",
+                user_id,
+                session_id,
+            )
 
     return summary_id
 

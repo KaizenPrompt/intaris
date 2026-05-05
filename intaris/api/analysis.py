@@ -368,6 +368,7 @@ async def submit_checkpoint(
 async def submit_agent_summary(
     session_id: str,
     request: AgentSummaryRequest,
+    http_request: Request,
     ctx: SessionContext = Depends(get_session_context),
 ) -> AgentSummaryResponse:
     """Submit agent-reported session summary.
@@ -400,6 +401,25 @@ async def submit_agent_summary(
                 """,
                 (summary_id, ctx.user_id, session_id, sanitized, now),
             )
+
+        # Fan out to the search indexer (vector tier). Lexical reads
+        # canonical agent_summaries directly via tsvector.
+        search_service = getattr(http_request.app.state, "search_service", None)
+        if search_service is not None and sanitized:
+            try:
+                search_service.enqueue_summary(
+                    user_id=ctx.user_id,
+                    session_id=session_id,
+                    agent_id=ctx.agent_id,
+                    ref_id=f"agent:{summary_id}",
+                    summary=sanitized,
+                    ts=now,
+                )
+            except Exception:
+                logger.exception(
+                    "Search indexer enqueue failed for agent_summary session=%s",
+                    session_id,
+                )
 
         return AgentSummaryResponse(ok=True)
     except ValueError as e:

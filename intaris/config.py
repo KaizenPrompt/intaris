@@ -367,6 +367,101 @@ class EventStoreConfig:
     )
 
 
+@dataclass
+class SearchConfig:
+    """Conversation search configuration.
+
+    Search runs against the canonical tables (``sessions``, ``audit_log``,
+    ``session_summaries``, ``agent_summaries``) and is split into three
+    kinds: ``summary``, ``intention``, ``reasoning``. The lexical tier
+    (Postgres ``tsvector`` + GIN, or SQLite ``LIKE`` against canonical
+    text) is always available when the master flag is on.
+
+    The vector tier is **optional**. When enabled, embed ops are queued
+    on every audit insert / summary insert and a background worker writes
+    dense (and on Qdrant: dense + sparse) vectors for hybrid recall:
+
+    - ``pgvector``: dense embeddings stored in ``search_vectors``;
+      Postgres-only. RRF-fused with PG lexical at query time.
+    - ``qdrant``: native Qdrant hybrid using a shared collection with
+      both dense and sparse vector configs (FastEmbed ``Qdrant/bm25``
+      sparse model runs locally, no network call). Server-side RRF
+      fusion. PG lexical is bypassed in Qdrant mode because Qdrant's
+      sparse vector covers token recall well enough.
+    """
+
+    enabled: bool = field(
+        default_factory=lambda: _env_bool("INTARIS_SEARCH_ENABLED", default=True)
+    )
+
+    # Vector tier (optional)
+    vector_provider: str = field(
+        default_factory=lambda: _env("INTARIS_SEARCH_VECTOR_PROVIDER", "disabled")
+    )
+
+    qdrant_url: str = field(default_factory=lambda: _env("INTARIS_SEARCH_QDRANT_URL"))
+    qdrant_api_key: str = field(
+        default_factory=lambda: _env("INTARIS_SEARCH_QDRANT_API_KEY")
+    )
+    qdrant_collection: str = field(
+        default_factory=lambda: _env(
+            "INTARIS_SEARCH_QDRANT_COLLECTION", "intaris-search"
+        )
+    )
+
+    embedding_model: str = field(
+        default_factory=lambda: _env("INTARIS_SEARCH_EMBEDDING_MODEL")
+    )
+    embedding_dim: int = field(
+        default_factory=lambda: _env_int("INTARIS_SEARCH_EMBEDDING_DIM", 1536)
+    )
+    embedding_base_url: str = field(
+        default_factory=lambda: _env("INTARIS_SEARCH_EMBEDDING_BASE_URL")
+    )
+    embedding_api_key: str = field(
+        default_factory=lambda: _env("INTARIS_SEARCH_EMBEDDING_API_KEY")
+    )
+    embedding_batch_size: int = field(
+        default_factory=lambda: _env_int("INTARIS_SEARCH_EMBEDDING_BATCH_SIZE", 32)
+    )
+    embedding_timeout_ms: int = field(
+        default_factory=lambda: _env_int("INTARIS_SEARCH_EMBEDDING_TIMEOUT_MS", 30000)
+    )
+
+    # Sparse vector model for Qdrant native hybrid. FastEmbed runs
+    # locally, no inference call.
+    sparse_model: str = field(
+        default_factory=lambda: _env("INTARIS_SEARCH_SPARSE_MODEL", "Qdrant/bm25")
+    )
+
+    # RRF fusion weighting between lexical and vector tiers (pgvector
+    # mode only — Qdrant fuses server-side).
+    hybrid_alpha: float = field(
+        default_factory=lambda: float(_env("INTARIS_SEARCH_HYBRID_ALPHA", "0.5") or 0.5)
+    )
+
+    backfill_batch_size: int = field(
+        default_factory=lambda: _env_int("INTARIS_SEARCH_BACKFILL_BATCH_SIZE", 200)
+    )
+    max_text_bytes: int = field(
+        default_factory=lambda: _env_int("INTARIS_SEARCH_MAX_TEXT_BYTES", 8192)
+    )
+    indexer_poll_interval_seconds: float = field(
+        default_factory=lambda: float(
+            _env("INTARIS_SEARCH_INDEXER_POLL_INTERVAL", "1.0") or 1.0
+        )
+    )
+
+    def vector_enabled(self) -> bool:
+        return self.vector_provider != "disabled" and bool(self.embedding_model)
+
+    def resolve_embedding_api_key(self) -> str:
+        return self.embedding_api_key or _llm_api_key()
+
+    def resolve_embedding_base_url(self) -> str:
+        return self.embedding_base_url or _llm_base_url()
+
+
 def _build_analysis_llm_config() -> LLMConfig:
     """Build LLM config for L2 analysis tasks (session summaries).
 
@@ -451,6 +546,7 @@ class Config:
     mcp: MCPConfig = field(default_factory=MCPConfig)
     notification: NotificationConfig = field(default_factory=NotificationConfig)
     event_store: EventStoreConfig = field(default_factory=EventStoreConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
 
     def validate(self) -> None:
         """Validate that required configuration is present."""
@@ -466,13 +562,9 @@ class Config:
                 "Format: postgresql://user:password@host:port/dbname"
             )
         if self.db.pool_min_conn < 1:
-            raise ValueError(
-                f"DB_POOL_MIN_CONN={self.db.pool_min_conn} must be >= 1."
-            )
+            raise ValueError(f"DB_POOL_MIN_CONN={self.db.pool_min_conn} must be >= 1.")
         if self.db.pool_max_conn < 1:
-            raise ValueError(
-                f"DB_POOL_MAX_CONN={self.db.pool_max_conn} must be >= 1."
-            )
+            raise ValueError(f"DB_POOL_MAX_CONN={self.db.pool_max_conn} must be >= 1.")
         if self.db.pool_min_conn > self.db.pool_max_conn:
             raise ValueError(
                 "DB_POOL_MIN_CONN cannot be greater than DB_POOL_MAX_CONN."
@@ -503,6 +595,50 @@ class Config:
                 "Configure only one JWT verifier source: "
                 "INTARIS_JWT_PUBLIC_KEY or INTARIS_JWKS_URL"
             )
+
+        # Search subsystem validation (only when enabled).
+        if self.search.enabled:
+            if self.search.vector_provider not in (
+                "disabled",
+                "pgvector",
+                "qdrant",
+            ):
+                raise ValueError(
+                    "INTARIS_SEARCH_VECTOR_PROVIDER="
+                    f"{self.search.vector_provider} is not supported. "
+                    "Use 'disabled', 'pgvector', or 'qdrant'."
+                )
+            if (
+                self.search.vector_provider == "pgvector"
+                and self.db.backend != "postgresql"
+            ):
+                raise ValueError(
+                    "INTARIS_SEARCH_VECTOR_PROVIDER=pgvector requires "
+                    "DB_BACKEND=postgresql."
+                )
+            if self.search.vector_provider == "qdrant" and not self.search.qdrant_url:
+                raise ValueError(
+                    "INTARIS_SEARCH_VECTOR_PROVIDER=qdrant requires "
+                    "INTARIS_SEARCH_QDRANT_URL (server URL or local path)."
+                )
+            if (
+                self.search.vector_provider != "disabled"
+                and not self.search.embedding_model
+            ):
+                raise ValueError(
+                    "INTARIS_SEARCH_EMBEDDING_MODEL is required when "
+                    "INTARIS_SEARCH_VECTOR_PROVIDER is not 'disabled'."
+                )
+            if self.search.embedding_dim < 1:
+                raise ValueError(
+                    "INTARIS_SEARCH_EMBEDDING_DIM="
+                    f"{self.search.embedding_dim} must be >= 1."
+                )
+            if not (0.0 <= self.search.hybrid_alpha <= 1.0):
+                raise ValueError(
+                    "INTARIS_SEARCH_HYBRID_ALPHA="
+                    f"{self.search.hybrid_alpha} must be between 0 and 1."
+                )
         if self.server.jwt_public_key and not os.path.isfile(
             self.server.jwt_public_key
         ):

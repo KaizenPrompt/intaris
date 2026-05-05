@@ -27,6 +27,17 @@ class AuditStore:
 
     VALID_RECORD_TYPES = {"tool_call", "reasoning", "checkpoint", "summary"}
 
+    # Optional SearchService handle, set by the server lifespan once
+    # both services are ready. When present, every insert fans out to
+    # the search indexer (vector tier only — lexical search reads
+    # canonical tables directly via tsvector). Best-effort: indexer
+    # failures never block the canonical audit insert.
+    _search_service: Any = None
+
+    @classmethod
+    def set_search_service(cls, service: Any) -> None:
+        cls._search_service = service
+
     def __init__(self, db: Database):
         self._db = db
 
@@ -122,6 +133,43 @@ class AuditStore:
                     injection_detected,
                 ),
             )
+
+        # Fan out to the search indexer (vector tier only). Lexical
+        # search reads canonical tables directly via tsvector — no
+        # write needed here for that.
+        svc = AuditStore._search_service
+        if svc is not None:
+            try:
+                if intention and intention.strip():
+                    svc.enqueue_audit_intention(
+                        user_id=user_id,
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        ref_id=record_id,
+                        intention=intention,
+                        ts=now,
+                    )
+                if (
+                    record_type in ("reasoning", "checkpoint")
+                    and content
+                    and content.strip()
+                ):
+                    svc.enqueue_audit_reasoning(
+                        user_id=user_id,
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        ref_id=record_id,
+                        content=content,
+                        ts=now,
+                    )
+            except Exception:
+                logger.exception(
+                    "Search indexer enqueue failed (audit_log insert "
+                    "user=%s session=%s record_type=%s)",
+                    user_id,
+                    session_id,
+                    record_type,
+                )
 
         return {
             "id": record_id,

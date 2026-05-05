@@ -559,6 +559,135 @@ Used by the OpenClaw plugin to proxy MCP tool calls through Intaris with safety 
 | `reasoning` | string | Evaluation reasoning (for deny/escalate) |
 | `latency_ms` | number | Total latency including evaluation and upstream call |
 
+## Search
+
+Conversation search across summaries, intentions, and reasoning. Lexical
+tier reads canonical tables directly via `tsvector`/`LIKE` and is always
+available. Optional vector tier adds semantic recall via pgvector (dense
+only) or Qdrant (native dense+sparse hybrid).
+
+The master flag is `INTARIS_SEARCH_ENABLED`; when off, every endpoint in
+this section returns 404.
+
+### POST /search
+
+Flat match list with snippets.
+
+**Request:**
+
+```json
+{
+  "q": "rocket launch",
+  "filters": {
+    "agent_id": "agent-1",
+    "session_id": "ses_abc",
+    "session_ids": ["ses_abc", "ses_def"],
+    "from_ts": "2026-01-01T00:00:00Z",
+    "to_ts": "2026-12-31T23:59:59Z"
+  },
+  "kinds": ["summary", "intention", "reasoning"],
+  "mode": "auto",
+  "limit": 50,
+  "cursor": null
+}
+```
+
+`kinds` (optional) restricts to a subset of `summary`, `intention`,
+`reasoning`. `mode`: `auto` (default; hybrid when vector tier is healthy,
+lexical otherwise), `lexical`, `vector`, or `hybrid`. `cursor` is opaque.
+
+**Response:**
+
+```json
+{
+  "matches": [
+    {
+      "session_id": "ses_abc",
+      "kind": "intention",
+      "ref_id": "audit-uuid",
+      "role": null,
+      "ts": "2026-04-12T10:30:00Z",
+      "snippet": "...the <mark>rocket</mark> launched at dawn...",
+      "score": 0.83,
+      "score_breakdown": {"lexical": 0.7, "vector": 0.92},
+      "agent_id": "agent-1"
+    }
+  ],
+  "next_cursor": null,
+  "total_estimated": null,
+  "backend": {
+    "lexical": "postgres-fts",
+    "vector": "qdrant",
+    "mode_used": "vector"
+  }
+}
+```
+
+### POST /search/sessions
+
+Aggregated by session. Same request shape as `/search`; returns one row
+per session with `top_match` and `match_count`.
+
+### GET /search/health
+
+Backend capabilities and vector tier state.
+
+```json
+{
+  "enabled": true,
+  "lexical": {
+    "backend": "postgres-fts",
+    "unaccent": true,
+    "pg_trgm": true,
+    "kinds": ["summary", "intention", "reasoning"]
+  },
+  "vector": {
+    "provider": "qdrant",
+    "model": "text-embedding-3-small",
+    "dim": 1536,
+    "sparse_model": "Qdrant/bm25",
+    "queue_depth": 0,
+    "last_index_at": "2026-04-12T10:30:00Z",
+    "backfill_status": "idle",
+    "backfill_total": null,
+    "backfill_processed": null,
+    "backfill_job_id": null
+  },
+  "notes": []
+}
+```
+
+### POST /search/reindex
+
+Enqueue a vector-tier backfill job (404 when vector tier disabled).
+Returns `{job_id, status}`.
+
+### GET /search/reindex/{job_id}
+
+Poll a backfill job:
+
+```json
+{"job_id": "uuid", "state": "running", "total": 200, "processed": 87, "error": null}
+```
+
+### GET /search/config
+
+Resolved configuration snapshot for the admin UI:
+
+```json
+{
+  "enabled": true,
+  "lexical": { "backend": "postgres-fts", "unaccent": true, "pg_trgm": true,
+               "kinds": ["summary","intention","reasoning"] },
+  "vector":  { "provider": "qdrant", "model": "text-embedding-3-small",
+               "dim": 1536, "sparse_model": "Qdrant/bm25",
+               "queue_depth": 0, "last_index_at": null,
+               "backfill_status": "idle", ... },
+  "indexable_kinds": ["intention","reasoning","summary"],
+  "notes": []
+}
+```
+
 ## Notifications
 
 ### GET /notifications/channels

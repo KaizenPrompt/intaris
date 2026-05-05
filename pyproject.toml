@@ -40,6 +40,13 @@ dependencies = [
 postgresql = [
     "psycopg2-binary>=2.9.0",
 ]
+# Optional vector tier for the search subsystem. ``qdrant-client`` brings
+# in Qdrant local-mode and server-mode support; ``fastembed`` enables the
+# BM25 sparse vector for native dense+sparse hybrid search.
+search-qdrant = [
+    "qdrant-client>=1.10.0",
+    "fastembed>=0.3.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-timeout>=2.3.0",

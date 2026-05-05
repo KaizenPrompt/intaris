@@ -52,6 +52,18 @@ intaris/
 │   ├── __init__.py        # Package marker
 │   ├── backend.py         # EventBackend Protocol, FilesystemEventBackend, S3EventBackend
 │   └── store.py           # EventStore (high-level wrapper with EventBuffer, EventBus integration)
+├── search/
+│   ├── __init__.py        # Re-exports types and kind constants
+│   ├── types.py           # Pydantic types + KIND_SUMMARY/INTENTION/REASONING
+│   ├── schema.py          # Idempotent bootstrap (PG tsvector + GIN indexes on canonical tables; vector tables on demand)
+│   ├── state.py           # search_state singleton (vector tier metadata + backfill progress)
+│   ├── outbox.py          # Durable indexer queue (vector ops only)
+│   ├── lexical.py         # Per-kind queries against canonical tables (PG + SQLite)
+│   ├── vector.py          # Optional vector tier — pgvector (dense) and Qdrant (native dense+sparse hybrid)
+│   ├── embeddings.py      # OpenAI-compatible embedding client
+│   ├── fusion.py          # RRF for the pgvector + lexical hybrid path
+│   ├── cursor.py          # Opaque cursor encode/decode
+│   └── service.py         # SearchService — query orchestrator + indexer worker + backfill
 ├── mcp/
 │   ├── __init__.py        # Package marker
 │   ├── store.py           # MCPServerStore CRUD + tool preferences (encrypted secrets)
@@ -69,6 +81,7 @@ intaris/
 │   ├── mcp.py             # MCP server CRUD + tool preference endpoints
 │   ├── analysis.py        # Behavioral analysis endpoints (L1/L2/L3 data collection + retrieval)
 │   ├── events.py          # Session recording endpoints (POST/GET events, flush)
+│   ├── search.py          # Conversation search endpoints (/search, /search/sessions, /search/health, /search/reindex, /search/config)
 │   └── stream.py          # EventBus + WebSocket streaming (first-message auth)
 └── ui/
     ├── __init__.py        # Package marker
@@ -76,7 +89,7 @@ intaris/
     ├── src/
     │   └── input.css      # Tailwind source CSS with component classes
     └── static/
-        ├── index.html     # Single-page app (Alpine.js + Tailwind, 6 tabs)
+        ├── index.html     # Single-page app (Alpine.js + Tailwind, 8 tabs)
         ├── css/
         │   └── app.css    # Pre-built Tailwind output (committed)
         ├── js/
@@ -84,6 +97,7 @@ intaris/
         │   ├── app.js     # Alpine.js stores (auth, nav, notify)
         │   ├── dashboard.js # Dashboard tab component
         │   ├── sessions.js  # Sessions tab component
+    │   ├── search.js    # Search tab + Settings search card components
         │   ├── player.js    # Session recording player component
         │   ├── audit.js     # Audit tab component
         │   ├── approvals.js # Approvals tab component (WebSocket + polling fallback)
@@ -117,6 +131,7 @@ intaris/
 | **Rate Limiting** | `ratelimit.py` | In-memory sliding window rate limiter per (user_id, session_id) |
 | **Webhook** | `webhook.py` | Async webhook client with HMAC-SHA256 signing for escalation callbacks |
 | **Event Store** | `events/` | Session recording: chunked ndjson storage, write buffering, EventBus integration |
+| **Search** | `search/` | Three-kind conversation search (`summary`, `intention`, `reasoning`) reading directly from canonical tables. Lexical tier always available; optional vector tier (pgvector or Qdrant native dense+sparse hybrid). |
 | **Session** | `session.py` | Session CRUD, counter management, paginated listing, idle sweep |
 | **Audit** | `audit.py` | Audit log CRUD and querying (reasoning, checkpoint, summary record types) |
 | **Database** | `db.py` | SQLite connection management, schema (incl. analysis tables) |
@@ -214,6 +229,22 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `JUDGE_LLM_API_KEY` | Judge LLM API key (falls back to `LLM_API_KEY`) |
 | `JUDGE_LLM_REASONING_EFFORT` | Reasoning effort for judge LLM (default `low`) |
 | `JUDGE_LLM_TIMEOUT_MS` | Timeout for judge LLM calls in milliseconds (default `15000`) |
+| `INTARIS_SEARCH_ENABLED` | Master flag for the conversation search subsystem (default `true`). When `false`, all `/api/v1/search/*` routes return 404 and the indexer does not start. |
+| `INTARIS_SEARCH_VECTOR_PROVIDER` | Vector tier provider: `disabled` (default), `pgvector`, or `qdrant`. Lexical tier is always available; vector adds semantic / multilingual recall. |
+| `INTARIS_SEARCH_QDRANT_URL` | Qdrant endpoint when `vector_provider=qdrant`. URL form (`http(s)://host:port`) for shared deployments or a local path (`/abs/path` or `file:///abs/path`) for single-user quickstart installs (no service required). |
+| `INTARIS_SEARCH_QDRANT_API_KEY` | Qdrant API key (optional). |
+| `INTARIS_SEARCH_QDRANT_COLLECTION` | Qdrant collection name (default `intaris-search`). |
+| `INTARIS_SEARCH_EMBEDDING_MODEL` | OpenAI-compatible embedding model id (e.g. `text-embedding-3-small`, `bge-m3`). LiteLLM-style provider prefixes (`openai/...`, `ollama/...`) are stripped automatically. Required when `vector_provider != disabled`. |
+| `INTARIS_SEARCH_EMBEDDING_DIM` | Embedding dimension (default `1536`). Mismatch with the model triggers an automatic backfill on next start. |
+| `INTARIS_SEARCH_EMBEDDING_BASE_URL` | Embedding endpoint root (falls back to `LLM_BASE_URL`). |
+| `INTARIS_SEARCH_EMBEDDING_API_KEY` | Embedding API key (falls back to `LLM_API_KEY`; local Ollama servers accept any non-empty value). |
+| `INTARIS_SEARCH_EMBEDDING_BATCH_SIZE` | Number of texts embedded per batch call (default `32`). |
+| `INTARIS_SEARCH_EMBEDDING_TIMEOUT_MS` | Timeout for embedding calls in milliseconds (default `30000`). |
+| `INTARIS_SEARCH_SPARSE_MODEL` | FastEmbed sparse model used by Qdrant native hybrid (default `Qdrant/bm25`). Runs locally, no inference call. |
+| `INTARIS_SEARCH_HYBRID_ALPHA` | RRF lexical weight for the pgvector path (default `0.5`). Qdrant fuses server-side and ignores this. |
+| `INTARIS_SEARCH_BACKFILL_BATCH_SIZE` | Rows per batch during reindex (default `200`). |
+| `INTARIS_SEARCH_MAX_TEXT_BYTES` | Per-row truncation before embedding (default `8192`). |
+| `INTARIS_SEARCH_INDEXER_POLL_INTERVAL` | Indexer worker poll interval in seconds when the outbox is empty (default `1.0`). |
 
 ## Build / Run / Test
 
@@ -951,7 +982,7 @@ Single-page web UI served at `/ui` for monitoring and managing Intaris. Built wi
 ### Architecture
 
 - **No build step at runtime**: Alpine.js is vendored (`static/vendor/alpine.min.js`), Tailwind CSS is pre-built and committed (`static/css/app.css`).
-- **Tab-based navigation**: 6 tabs — Dashboard, Sessions, Audit, Approvals, Servers, Settings.
+- **Tab-based navigation**: 8 tabs — Dashboard, Sessions, Search, Audit, Approvals, Analysis, Servers, Settings.
 - **Auth**: API key stored in `localStorage`, sent via `X-API-Key` header. User impersonation via `X-User-Id` header when `can_switch_user` is true.
 - **Real-time updates**: Approvals tab uses WebSocket (`/api/v1/stream`) for real-time updates with 10s polling fallback.
 
@@ -961,6 +992,7 @@ Single-page web UI served at `/ui` for monitoring and managing Intaris. Built wi
 |---|---|---|
 | **Dashboard** | Stat cards, decision distribution, recent activity | `GET /stats`, `GET /audit` |
 | **Sessions** | Filterable session list with expandable detail | `GET /sessions`, `GET /session/{id}`, `GET /audit`, `PATCH /session/{id}/status` |
+| **Search** | Conversation search across summaries, intentions, and reasoning. Grouped-by-session and flat match views. | `POST /search`, `POST /search/sessions`, `GET /search/health` |
 | **Audit** | Filterable audit log table with expandable detail | `GET /audit` |
 | **Approvals** | Pending escalations with approve/deny actions | `GET /audit?decision=escalate&resolved=false`, `POST /decision` |
 | **Servers** | MCP server management — add/edit/delete upstream servers, tool preferences | `GET/PUT/DELETE /mcp/servers/{name}`, `GET/PUT/DELETE /mcp/servers/{name}/tools/{tool}/preference` |
@@ -1089,6 +1121,55 @@ File-defined servers are stored with `source="file"` in the database. On startup
 - **`mcp_servers`**: `name` (PK), `user_id`, `transport`, `config_json` (encrypted if secrets), `enabled`, `source` ("api"/"file"), `tools_cache`, `tools_cache_at`, `created_at`, `updated_at`.
 - **`mcp_tool_preferences`**: `server_name` + `tool_name` (compound PK), `user_id`, `preference` (CHECK: auto-approve/escalate/deny), `created_at`.
 - **`audit_log.args_hash`**: SHA-256 column for escalation retry lookup. Indexed via `idx_audit_escalation_retry(user_id, tool, args_hash, decision)`.
+
+## Conversation Search
+
+Three search kinds covering "find that session" / "what was this session about" / "what did we discuss":
+
+| Kind | Source table | Notes |
+|---|---|---|
+| `summary` | `session_summaries` (window + compacted) ∪ `agent_summaries` | Highest-signal, LLM-distilled. Few rows per session. May not exist for new sessions. |
+| `intention` | `audit_log.intention` (deduped per session via `DISTINCT ON`) | Always present once a session has any tool calls. LLM-rewritten English. Captures session topic over time. |
+| `reasoning` | `audit_log.content` for `record_type IN ('reasoning','checkpoint')` | Most granular textual evidence. Includes user messages (`User message: ...` prefix) and agent reasoning, distinguished by the `role` field. |
+
+The event store and raw user/assistant messages are intentionally NOT searched. Lexical search reads canonical tables directly via tsvector — there is no projection table or write-time indexer hook for the lexical tier.
+
+### Lexical tier (always available)
+
+- **Postgres**: generated `tsvector` columns added to `sessions`, `audit_log`, `session_summaries`, `agent_summaries`. Partial GIN indexes scope to the rows we search (e.g. `audit_log` only indexes rows where `record_type IN ('reasoning','checkpoint')`). `unaccent` and `pg_trgm` extensions probed at startup with graceful fallback.
+- **SQLite**: case-folded `LIKE` against canonical text columns. No FTS5 / triggers — kept simple for single-user installs.
+
+`unaccent` and `pg_trgm` are optional; bootstrap probes them inside `SAVEPOINT`s and falls back when unavailable.
+
+### Vector tier (optional)
+
+When `INTARIS_SEARCH_VECTOR_PROVIDER` is set, audit/summary inserts fan out to the indexer worker through `search_outbox`. Two providers:
+
+- **`pgvector`** (Postgres only): dense embeddings stored in `search_vectors` with HNSW cosine. RRF-fused with PG lexical at query time.
+- **`qdrant`**: native dense + sparse hybrid in a single collection per Intaris instance. Sparse vectors come from FastEmbed's local `Qdrant/bm25` model (no inference call). Server-side RRF fusion via the Query API. PG lexical is bypassed in this mode because Qdrant's sparse vector covers token recall.
+
+Qdrant `qdrant_url` accepts a server URL (`http(s)://host:port`) or a local-mode filesystem path (`/abs/path` or `file:///abs/path`). Local-mode runs against an embedded SQLite-backed Qdrant — perfect for single-user installs. Install with `pip install intaris[search-qdrant]` to pull in `qdrant-client` and `fastembed`.
+
+### REST API
+
+- `POST /api/v1/search` — flat match list with snippets.
+- `POST /api/v1/search/sessions` — aggregated by session (top match + count).
+- `GET /api/v1/search/health` — backend capabilities, queue depth, backfill state.
+- `POST /api/v1/search/reindex` — enqueue a vector-tier backfill (404 when vector tier disabled).
+- `GET /api/v1/search/reindex/{job_id}` — job status.
+- `GET /api/v1/search/config` — resolved config for the admin UI.
+
+When `INTARIS_SEARCH_ENABLED=false`, all `/api/v1/search/*` routes return 404 and the indexer does not start.
+
+### Caller scoping
+
+`user_id` is always derived from the authenticated `SessionContext` — body-supplied scopes are ignored. Tenant isolation is preserved by the same WHERE clauses used elsewhere in the codebase.
+
+### Backfill
+
+Lexical search needs no backfill — Postgres generated columns populate automatically, SQLite reads canonical text directly.
+
+Vector tier records the resolved configuration in `search_state` (`vector_provider`, `vector_model`, `vector_dim`, `sparse_model`). Drift on next start auto-enqueues a backfill that walks the canonical tables in batches and queues `embed` ops on `search_outbox`. Existing rows in `search_vectors` / Qdrant are upserted idempotently.
 
 ## Important Notes
 

@@ -107,6 +107,61 @@ Clients send the key via `Authorization: Bearer <key>` or `X-API-Key: <key>` hea
 
 See the [Configuration Reference](configuration.md) for all environment variables.
 
+## Step 5 (Optional): Conversation Search
+
+Intaris ships a **Search** tab in the management UI that lets you find
+sessions by content across three kinds: summaries, intentions, and
+reasoning. The lexical tier (Postgres `tsvector` + GIN, or plain
+`LIKE` on SQLite) is enabled by default — no extra configuration
+needed. It reads directly from the canonical tables you already have.
+
+For semantic / multilingual recall the optional vector tier adds
+either pgvector (dense embeddings, Postgres-only) or **Qdrant native
+dense + sparse hybrid** (works with any backend).
+
+### Single-user / quickstart with serverless Qdrant
+
+The simplest production-quality setup pairs Intaris on SQLite with
+Qdrant in **local-mode** (an embedded, SQLite-backed Qdrant —
+no service required). Combined with a local Ollama embedding server,
+the entire stack runs without any external services:
+
+```bash
+pip install intaris[search-qdrant]
+ollama pull bge-m3
+
+export INTARIS_SEARCH_VECTOR_PROVIDER=qdrant
+export INTARIS_SEARCH_QDRANT_URL=~/.intaris/qdrant         # local-mode path
+export INTARIS_SEARCH_EMBEDDING_MODEL=bge-m3
+export INTARIS_SEARCH_EMBEDDING_DIM=1024
+export INTARIS_SEARCH_EMBEDDING_BASE_URL=http://localhost:11434/v1
+export INTARIS_SEARCH_EMBEDDING_API_KEY=ollama
+```
+
+When the path looks like a filesystem path (`~/.intaris/qdrant`,
+`/abs/path`, or `file:///abs/path`) Intaris automatically uses Qdrant
+local-mode — there is no Qdrant service to run, and the index
+persists alongside your SQLite database.
+
+### Postgres deployments
+
+If Intaris already runs on Postgres, pgvector is the lowest-overhead
+vector option (no extra service):
+
+```bash
+export INTARIS_SEARCH_VECTOR_PROVIDER=pgvector
+export INTARIS_SEARCH_EMBEDDING_MODEL=text-embedding-3-small
+export INTARIS_SEARCH_EMBEDDING_DIM=1536
+export INTARIS_SEARCH_EMBEDDING_API_KEY=$OPENAI_API_KEY
+```
+
+For shared deployments with an existing Qdrant cluster, point
+`INTARIS_SEARCH_QDRANT_URL` at the cluster URL.
+
+To turn search off entirely set `INTARIS_SEARCH_ENABLED=false`. See
+the [Conversation Search section in AGENTS.md](../AGENTS.md#conversation-search)
+for the full architecture.
+
 ## What's Next
 
 - [Architecture](architecture.md) — Understand how Intaris evaluates tool calls
