@@ -1522,7 +1522,7 @@ class TestJudgeReviewer:
             system_content = messages[0]["content"]
             assert "Advisory Mode" in system_content
             assert "Defer is your default" in system_content
-            assert "unambiguously dangerous" in system_content
+            assert "unambiguously operationally dangerous" in system_content
             # Risk-level guidance for low-risk approvals
             assert "Low risk" in system_content
             assert "Approve by default" in system_content

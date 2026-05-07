@@ -195,3 +195,70 @@ class TestUserDecisionsPromptRendering:
 
         assert section is not None
         assert "prior_reasoning" not in section
+
+
+class TestEvaluatorScopeRules:
+    """The L1 evaluator must focus on operational safety, not topic or
+    tool-argument quality. These regression tests guard the prompt rules
+    that prevent false-deny on sensitive subjects and false-escalate on
+    ambiguous arguments."""
+
+    def test_prompt_declares_operational_safety_scope(self):
+        assert "Scope of Safety Evaluation" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        assert "operational safety" in SAFETY_EVALUATION_SYSTEM_PROMPT
+
+    def test_prompt_forbids_content_moderation(self):
+        assert "No content moderation" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        assert "Topic is never the risk" in SAFETY_EVALUATION_SYSTEM_PROMPT
+
+    def test_prompt_forbids_legality_assessment(self):
+        assert "No legality assessment" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        assert "Owner-operations on owner-property" in SAFETY_EVALUATION_SYSTEM_PROMPT
+
+    def test_prompt_forbids_arg_ambiguity_as_risk(self):
+        assert "Tool-argument quality is not safety" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        assert (
+            "Tool-argument ambiguity is never the risk"
+            in SAFETY_EVALUATION_SYSTEM_PROMPT
+        )
+
+    def test_prompt_critical_requires_operational_action(self):
+        assert (
+            "Critical risk requires an *operationally* dangerous action"
+            in SAFETY_EVALUATION_SYSTEM_PROMPT
+        )
+        assert (
+            "destructive or exfiltrating *operation*"
+            in SAFETY_EVALUATION_SYSTEM_PROMPT
+        )
+        assert "subject matter" in SAFETY_EVALUATION_SYSTEM_PROMPT
+
+
+class TestJudgeScopeRules:
+    """The judge must mirror the L1 scope rules — same operational-only focus."""
+
+    def test_judge_system_prompt_has_operational_safety_scope(self):
+        assert "operational safety only" in JUDGE_SYSTEM_PROMPT
+        assert "Tool-argument ambiguity is not a safety signal" in JUDGE_SYSTEM_PROMPT
+
+    def test_judge_auto_decision_rules_forbid_topic_moderation(self):
+        from intaris.judge import _DECISION_RULES_AUTO
+
+        assert "operational safety" in _DECISION_RULES_AUTO
+        assert "Do NOT moderate by topic" in _DECISION_RULES_AUTO
+        assert "ambiguity" in _DECISION_RULES_AUTO
+
+    def test_judge_advisory_decision_rules_forbid_topic_moderation(self):
+        from intaris.judge import _DECISION_RULES_ADVISORY
+
+        assert "operational safety" in _DECISION_RULES_ADVISORY
+        assert "Do NOT moderate by topic" in _DECISION_RULES_ADVISORY
+        assert "Approve" in _DECISION_RULES_ADVISORY
+
+    def test_judge_advisory_deny_excludes_topic_only(self):
+        from intaris.judge import _DECISION_RULES_ADVISORY
+
+        assert (
+            "Never** deny for sensitive subject matter alone"
+            in _DECISION_RULES_ADVISORY
+        )
