@@ -70,6 +70,9 @@ class SearchService:
         self._enabled = config.enabled
         self._schema = SearchSchema(
             vector_enabled=config.vector_enabled(),
+            pgvector_enabled=(
+                config.vector_enabled() and config.vector_provider == "pgvector"
+            ),
             embedding_dim=config.embedding_dim,
         )
         self._vector: VectorBackend = DisabledVectorBackend()

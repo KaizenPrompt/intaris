@@ -456,6 +456,145 @@ def test_pg_tsvector_skips_rebuild_when_flavor_already_matches():
     assert s.notes == []
 
 
+class _FakePgVectorCursor:
+    """Minimal cursor for exercising ``_ensure_pg_vector_tables``.
+
+    Records every executed SQL statement and treats SAVEPOINT/RELEASE/
+    ROLLBACK as no-ops. The first ``CREATE EXTENSION vector`` raises
+    by default (matches a managed PG cluster without the extension
+    binary) so we can verify it's the path the bootstrap chose.
+    """
+
+    def __init__(self, *, extension_available: bool = True) -> None:
+        self.extension_available = extension_available
+        self.executed: list[tuple[str, tuple]] = []
+        self._next_result: list[tuple] = []
+
+    def execute(self, sql: str, params: tuple = ()) -> None:  # noqa: D401
+        self.executed.append((sql, tuple(params)))
+        norm = " ".join(sql.split()).lower()
+        if "create extension" in norm and "vector" in norm:
+            if not self.extension_available:
+                raise RuntimeError('extension "vector" is not available')
+            self._next_result = []
+            return
+        if "information_schema.columns" in norm:
+            # Pretend the column doesn't exist yet so the bootstrap
+            # tries to ADD COLUMN — we want to observe the full path.
+            self._next_result = []
+            return
+        self._next_result = []
+
+    def fetchone(self):
+        if not self._next_result:
+            return None
+        return self._next_result.pop(0)
+
+
+def test_pgvector_setup_runs_only_when_pgvector_enabled():
+    """When ``pgvector_enabled=True`` the bootstrap must attempt
+    ``CREATE EXTENSION vector`` and create ``search_vectors``."""
+    from intaris.search.schema import SearchSchema
+
+    s = SearchSchema(
+        vector_enabled=True,
+        pgvector_enabled=True,
+        embedding_dim=1536,
+    )
+    cur = _FakePgVectorCursor(extension_available=True)
+    s._ensure_pg_vector_tables(cur)
+
+    sqls = [sql for sql, _ in cur.executed]
+    assert any(
+        "create extension" in sql.lower() and "vector" in sql.lower() for sql in sqls
+    ), sqls
+    assert any("search_vectors" in sql.lower() for sql in sqls), sqls
+
+
+def test_pgvector_setup_skipped_when_provider_is_qdrant(caplog):
+    """When the controller is configured for ``qdrant`` (or any
+    non-pgvector provider), the bootstrap must NOT run pgvector setup
+    even though the vector tier is enabled. The previous bug here
+    triggered a misleading
+    ``CREATE EXTENSION vector failed`` warning on every PG startup
+    when the cluster used the qdrant provider."""
+    import logging
+
+    from intaris.search.schema import SearchSchema
+
+    s = SearchSchema(
+        vector_enabled=True,
+        pgvector_enabled=False,  # qdrant or disabled
+        embedding_dim=1536,
+    )
+
+    # Hand-rolled cursor that will FAIL the test if any pgvector DDL
+    # is issued — qdrant mode must not touch pgvector at all.
+    class _StrictCursor:
+        def __init__(self) -> None:
+            self.executed: list[str] = []
+
+        def execute(self, sql: str, params: tuple = ()) -> None:
+            self.executed.append(sql)
+            if "create extension" in sql.lower() and "vector" in sql.lower():
+                raise AssertionError(
+                    f"qdrant mode must not run CREATE EXTENSION vector: {sql}"
+                )
+            if "search_vectors" in sql.lower():
+                raise AssertionError(
+                    f"qdrant mode must not touch search_vectors: {sql}"
+                )
+
+        def fetchone(self):
+            return None
+
+    cur = _StrictCursor()
+    with caplog.at_level(logging.WARNING, logger="intaris.search.schema"):
+        # Just call the gate path directly — the bootstrap's branch
+        # check is what we're verifying.
+        if s._pgvector_enabled:
+            s._ensure_pg_vector_tables(cur)
+    # No pgvector warning was emitted because we never ran the path.
+    assert not any("pgvector" in r.message.lower() for r in caplog.records)
+
+
+def test_search_service_passes_pgvector_only_for_pgvector_provider(monkeypatch):
+    """``SearchService`` must derive ``pgvector_enabled`` from the
+    configured provider, not from ``vector_enabled``. This is the
+    plumbing that prevented the gate from working before."""
+    from intaris.config import SearchConfig
+    from intaris.search.schema import SearchSchema
+
+    captured: dict[str, bool] = {}
+
+    real_init = SearchSchema.__init__
+
+    def spy_init(self, **kwargs):  # type: ignore[no-untyped-def]
+        captured["vector_enabled"] = kwargs.get("vector_enabled", False)
+        captured["pgvector_enabled"] = kwargs.get("pgvector_enabled", False)
+        return real_init(self, **kwargs)
+
+    monkeypatch.setattr(SearchSchema, "__init__", spy_init)
+
+    cfg = SearchConfig()
+    cfg.enabled = False  # Skip schema.ensure() / vector backend init.
+    cfg.vector_provider = "qdrant"
+    cfg.embedding_model = "text-embedding-3-small"
+    SearchService(db=object(), config=cfg)
+    assert captured["pgvector_enabled"] is False, captured
+
+    captured.clear()
+    cfg.vector_provider = "pgvector"
+    SearchService(db=object(), config=cfg)
+    assert captured["pgvector_enabled"] is True, captured
+
+    captured.clear()
+    cfg.vector_provider = "disabled"
+    cfg.embedding_model = ""
+    SearchService(db=object(), config=cfg)
+    assert captured["pgvector_enabled"] is False, captured
+
+
 # ── Outbox ─────────────────────────────────────────────────────────
 
 

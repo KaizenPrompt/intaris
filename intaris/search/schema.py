@@ -268,8 +268,20 @@ INSERT OR IGNORE INTO search_state (id, updated_at)
 class SearchSchema:
     """Idempotent bootstrap for the search subsystem's storage."""
 
-    def __init__(self, *, vector_enabled: bool, embedding_dim: int) -> None:
+    def __init__(
+        self,
+        *,
+        vector_enabled: bool,
+        embedding_dim: int,
+        pgvector_enabled: bool = False,
+    ) -> None:
         self._vector_enabled = vector_enabled
+        # Provider-specific gate. Only ``pgvector`` requires the
+        # ``vector`` PG extension and the ``search_vectors`` table; the
+        # ``qdrant`` provider stores vectors externally and must NOT
+        # trigger ``CREATE EXTENSION vector`` (which logs a misleading
+        # warning on PG clusters where the extension binary is absent).
+        self._pgvector_enabled = pgvector_enabled
         self._embedding_dim = max(1, int(embedding_dim or 1))
         self.lexical_backend: str = "unknown"
         self.has_unaccent: bool = False
@@ -330,7 +342,14 @@ class SearchSchema:
                     "ALTER TABLE search_outbox ADD COLUMN claimed_at TIMESTAMPTZ"
                 )
 
-            if self._vector_enabled:
+            # Outbox + state are created above unconditionally so the
+            # vector provider can be toggled at runtime. The pgvector
+            # extension + ``search_vectors`` table are only created
+            # when the provider is actually pgvector — running them
+            # for qdrant or disabled would either fail noisily on
+            # clusters without the extension binary or create dead
+            # storage that nothing writes to.
+            if self._pgvector_enabled:
                 self._ensure_pg_vector_tables(cur)
 
             self.lexical_backend = "postgres-fts"
@@ -345,11 +364,13 @@ class SearchSchema:
                 )
 
         logger.info(
-            "Search schema (PG) ensured: lexical=%s unaccent=%s trgm=%s vector_enabled=%s",
+            "Search schema (PG) ensured: lexical=%s unaccent=%s trgm=%s "
+            "vector_enabled=%s pgvector=%s",
             self.lexical_backend,
             self.has_unaccent,
             self.has_pg_trgm,
             self._vector_enabled,
+            self._pgvector_enabled,
         )
 
     def _ensure_pg_tsvector_columns(self, cur: Any) -> None:
