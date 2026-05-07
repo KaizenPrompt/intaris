@@ -368,9 +368,12 @@ class QdrantVectorBackend:
                 models as qmodels,
             )
         except ImportError:
-            logger.warning(
-                "qdrant: qdrant-client not installed; vector tier disabled. "
-                "Install with `pip install intaris[search-qdrant]` to enable."
+            # ``qdrant-client`` is a mandatory core dependency. A
+            # missing import here means the install is broken — log
+            # ERROR rather than WARNING so it surfaces in alerts.
+            logger.error(
+                "qdrant: qdrant-client unavailable despite being a core "
+                "dependency; vector tier disabled. Reinstall intaris."
             )
             return
 
@@ -485,10 +488,12 @@ class QdrantVectorBackend:
             # FastEmbed sparse models — no inference call, runs locally.
             from fastembed import SparseTextEmbedding  # type: ignore[import-not-found]
         except ImportError:
-            logger.warning(
-                "qdrant: fastembed not installed; sparse-vector recall "
-                "disabled (will skip BM25 sparse). Install qdrant-client "
-                "with [fastembed] extra to enable."
+            # ``fastembed`` is a mandatory core dependency. A missing
+            # import here means the install is broken — log ERROR.
+            logger.error(
+                "qdrant: fastembed unavailable despite being a core "
+                "dependency; sparse-vector recall disabled (dense-only "
+                "fallback). Reinstall intaris."
             )
             self._sparse_embedder = None
             return

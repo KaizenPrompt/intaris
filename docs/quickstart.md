@@ -144,7 +144,7 @@ dense + sparse hybrid** (works with any backend).
 | Vector flavor | n/a | Dense only | **Dense + sparse** native hybrid |
 | Token recall | Lexical only | PG lexical RRF-fused with vector | Qdrant sparse BM25 server-side fused with dense |
 | Best for | Cheap defaults, single-user quickstart | Postgres deployments wanting semantic recall without a new service | Multilingual / paraphrase-heavy content; serverless single-user (local-mode) or multi-tenant (server URL) |
-| Install | built in | built in (needs `vector` extension on PG) | `pip install intaris[search-qdrant]` |
+| Install | built in | built in (needs `vector` extension on PG) | built in |
 
 ### Single-user / quickstart with serverless Qdrant
 
@@ -154,7 +154,7 @@ no service required). Combined with a local Ollama embedding server,
 the entire stack runs without any external services:
 
 ```bash
-pip install intaris[search-qdrant]
+pip install intaris
 ollama pull bge-m3
 
 export INTARIS_SEARCH_VECTOR_PROVIDER=qdrant

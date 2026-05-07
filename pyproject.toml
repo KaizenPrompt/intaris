@@ -34,18 +34,18 @@ dependencies = [
     "PyJWT[crypto]>=2.8.0",
     "cryptography>=43.0.0",
     "boto3>=1.34.0",
+    # Search vector tier — mandatory so the ``qdrant`` provider is
+    # always available without a separate install. ``qdrant-client``
+    # ships local-mode and server-mode support; ``fastembed`` enables
+    # the BM25 sparse vector for native dense+sparse hybrid. Both
+    # libraries are pure-Python wheels with modest install footprints.
+    "qdrant-client>=1.10.0",
+    "fastembed>=0.3.0",
 ]
 
 [project.optional-dependencies]
 postgresql = [
     "psycopg2-binary>=2.9.0",
-]
-# Optional vector tier for the search subsystem. ``qdrant-client`` brings
-# in Qdrant local-mode and server-mode support; ``fastembed`` enables the
-# BM25 sparse vector for native dense+sparse hybrid search.
-search-qdrant = [
-    "qdrant-client>=1.10.0",
-    "fastembed>=0.3.0",
 ]
 dev = [
     "pytest>=8.0",

@@ -1170,7 +1170,7 @@ lexical role.
 | Sparse model | n/a | n/a | FastEmbed `Qdrant/bm25` (local, no inference call) |
 | Fusion | n/a | Python RRF combining PG lexical + pgvector | Server-side RRF in Qdrant Query API |
 | Best for | Cheap defaults, ASCII-heavy content, single-user quickstart | Postgres deployments wanting semantic recall without a new service | Multilingual / paraphrase-heavy content; single-user via local-mode or multi-tenant via server URL |
-| Install command | built in | built in (needs `vector` extension on PG) | `pip install intaris[search-qdrant]` |
+| Install command | built in | built in (needs `vector` extension on PG) | built in |
 
 ### Lexical tier (always available)
 
@@ -1186,7 +1186,7 @@ When `INTARIS_SEARCH_VECTOR_PROVIDER` is set, audit/summary inserts fan out to t
 - **`pgvector`** (Postgres only): dense embeddings stored in `search_vectors` with HNSW cosine. RRF-fused with PG lexical at query time.
 - **`qdrant`**: native dense + sparse hybrid in a single collection per Intaris instance. Sparse vectors come from FastEmbed's local `Qdrant/bm25` model (no inference call). Server-side RRF fusion via the Query API. PG lexical is bypassed in this mode because Qdrant's sparse vector covers token recall.
 
-Qdrant `qdrant_url` accepts a server URL (`http(s)://host:port`) or a local-mode filesystem path (`/abs/path` or `file:///abs/path`). Local-mode runs against an embedded SQLite-backed Qdrant — perfect for single-user installs. Install with `pip install intaris[search-qdrant]` to pull in `qdrant-client` and `fastembed`.
+Qdrant `qdrant_url` accepts a server URL (`http(s)://host:port`) or a local-mode filesystem path (`/abs/path` or `file:///abs/path`). Local-mode runs against an embedded SQLite-backed Qdrant — perfect for single-user installs. `qdrant-client` and `fastembed` are mandatory core dependencies, so no extra install step is needed.
 
 ### REST API
 
