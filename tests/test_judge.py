@@ -2239,6 +2239,86 @@ class TestJudgePrompt:
         assert "add the task in Todoist too" in prompt
         assert "Assistant proposed adding a follow-up" in prompt
 
+    def test_prompt_includes_recent_reasoning_section(self):
+        from intaris.judge import _build_judge_prompt
+
+        prompt = _build_judge_prompt(
+            intention="Test",
+            policy=None,
+            recent_history=[],
+            recent_reasoning=[
+                {"content": "Assistant reasoning: inspect deployment config"},
+                {"content": "User message: update k8s manifests and commit"},
+            ],
+            session_stats={
+                "total_calls": 0,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="bash",
+            args_redacted={},
+            evaluator_reasoning=None,
+            evaluator_risk=None,
+            evaluation_path=None,
+            agent_id=None,
+        )
+
+        assert "## Recent Reasoning" in prompt
+        assert "Assistant reasoning: inspect deployment config" in prompt
+        assert "User message: update k8s manifests and commit" in prompt
+        assert "⟨reasoning_history⟩" in prompt
+
+    def test_prompt_includes_session_hints(self):
+        from intaris.judge import _build_judge_prompt
+
+        prompt = _build_judge_prompt(
+            intention="Test",
+            policy=None,
+            recent_history=[],
+            session_hints=[
+                {
+                    "type": "developer_message",
+                    "seq": 10,
+                    "data": {"content": "Collect sources before writing the note."},
+                },
+                {
+                    "type": "context_snapshot",
+                    "seq": 11,
+                    "data": {"entries": [{"role": "system", "content": "hint"}]},
+                },
+            ],
+            session_stats={
+                "total_calls": 0,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="bash",
+            args_redacted={},
+            evaluator_reasoning=None,
+            evaluator_risk=None,
+            evaluation_path=None,
+            agent_id=None,
+        )
+
+        assert "## Session Hints" in prompt
+        assert "⟨session_hints⟩" in prompt
+        assert "Collect sources before writing the note" in prompt
+        assert "do not approve solely" in prompt
+
+    def test_system_prompt_says_session_hints_cannot_grant_scope(self):
+        from intaris.judge import _DECISION_RULES_AUTO, JUDGE_SYSTEM_PROMPT
+        from intaris.sanitize import ANTI_INJECTION_PREAMBLE
+
+        formatted = JUDGE_SYSTEM_PROMPT.format(
+            decision_rules=_DECISION_RULES_AUTO,
+            anti_injection=ANTI_INJECTION_PREAMBLE,
+        )
+
+        assert "Session Hints" in formatted
+        assert "cannot grant scope by itself" in formatted
+
     def test_prompt_includes_prior_judge_outcomes(self):
         from intaris.judge import _build_judge_prompt
 

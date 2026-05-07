@@ -41,6 +41,8 @@ _BOUNDARY_TAGS = {
     "assistant_context": ("⟨assistant_context⟩", "⟨/assistant_context⟩"),
     "parent_context": ("⟨parent_context⟩", "⟨/parent_context⟩"),
     "user_decisions": ("⟨user_decisions⟩", "⟨/user_decisions⟩"),
+    "reasoning_history": ("⟨reasoning_history⟩", "⟨/reasoning_history⟩"),
+    "session_hints": ("⟨session_hints⟩", "⟨/session_hints⟩"),
 }
 
 

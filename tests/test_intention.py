@@ -238,6 +238,30 @@ class TestGenerateIntention:
         assert event["session_id"] == "sess-1"
         assert event["user_id"] == "user-1"
 
+    def test_appends_intention_updated_event(self, db, session_store, mock_llm):
+        """generate_intention appends a lifecycle intention_updated event."""
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        _insert_tool_call(db, "user-1", "sess-1")
+
+        event_store = MagicMock()
+        generate_intention(
+            llm=mock_llm,
+            db=db,
+            session_store=session_store,
+            user_id="user-1",
+            session_id="sess-1",
+            event_store=event_store,
+        )
+
+        event_store.append.assert_called_once()
+        user_id, session_id, events = event_store.append.call_args[0][:3]
+        assert user_id == "user-1"
+        assert session_id == "sess-1"
+        assert events[0]["type"] == "lifecycle"
+        assert events[0]["data"]["event"] == "intention_updated"
+        assert events[0]["data"]["old_intention"] == "Initial"
+        assert "OAuth2" in events[0]["data"]["new_intention"]
+
     def test_includes_user_messages_in_prompt(self, db, session_store, mock_llm):
         """generate_intention includes user messages as primary signal."""
         session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
@@ -257,10 +281,10 @@ class TestGenerateIntention:
         assert "Fix the login bug" in user_prompt
         assert "primary signal" in messages[0]["content"]
 
-    def test_excludes_agent_reasoning_from_user_message_prompt(
+    def test_includes_reasoning_payloads_with_prefixes_intact(
         self, db, session_store, mock_llm
     ):
-        """Only prefixed user messages feed the intention prompt."""
+        """Reasoning payloads feed the prompt with their prefixes intact."""
         session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
         _insert_reasoning(db, "user-1", "sess-1", "User message: Fix the login bug")
         _insert_reasoning(
@@ -281,7 +305,9 @@ class TestGenerateIntention:
 
         user_prompt = mock_llm.generate.call_args[0][0][1]["content"]
         assert "Fix the login bug" in user_prompt
-        assert "rewrite the intention" not in user_prompt
+        assert "User message: Fix the login bug" in user_prompt
+        assert "rewrite the intention" in user_prompt
+        assert "Recent reasoning entries" in user_prompt
 
     def test_prioritizes_latest_user_message_over_prior_intention(
         self, db, session_store, mock_llm
@@ -325,8 +351,9 @@ class TestGenerateIntention:
             "Prior session state"
         )
         assert "I can push ainews into origin/main for you if you want." in user_prompt
-        assert "keep at most two active goals" in system_prompt
-        assert "fade out" in system_prompt
+        assert "keep at most four active goals" in system_prompt
+        assert "Preserve active subscopes" in system_prompt
+        assert "fade out only" in system_prompt
 
     def test_includes_parent_intention_for_sub_sessions(
         self, db, session_store, mock_llm

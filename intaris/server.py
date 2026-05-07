@@ -583,6 +583,8 @@ async def lifespan(app):
         event_store = EventStore(cfg.event_store)
         event_store.set_event_bus(app.state.event_bus)
         app.state.event_store = event_store
+        if app.state.intention_barrier is not None:
+            app.state.intention_barrier.set_event_store(event_store)
         logger.info("Event store initialized (backend=%s)", cfg.event_store.backend)
     else:
         app.state.event_store = None
@@ -659,6 +661,7 @@ async def lifespan(app):
             intention_barrier=app.state.intention_barrier,
             alignment_barrier=app.state.alignment_barrier,
             event_bus=app.state.event_bus,
+            event_store=app.state.event_store,
             notification_dispatcher=notification_dispatcher,
             metrics=background_worker.metrics,
         )

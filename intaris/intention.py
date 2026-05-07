@@ -111,6 +111,9 @@ _DEFAULT_TIMEOUT_MS = 5000
 # Budget: 10s arrival + 5s barrier + 4s LLM eval = 19s (within 30s plugin timeout).
 _DEFAULT_POLL_TIMEOUT_MS = 10000
 
+_REASONING_CONTEXT_LIMIT = 20
+_REASONING_CONTEXT_CHAR_BUDGET = 6000
+
 
 def generate_intention(
     *,
@@ -120,14 +123,16 @@ def generate_intention(
     user_id: str,
     session_id: str,
     event_bus: Any | None = None,
+    event_store: Any | None = None,
     intention_source: str = "user",
     context: str | None = None,
     decision_context: dict[str, Any] | None = None,
 ) -> str | None:
-    """Generate an updated intention from user messages and tool calls.
+    """Generate an updated intention from reasoning payloads and tool calls.
 
     Uses the analysis LLM to summarize what the session is about based
-    on user messages (primary signal) and recent tool calls (secondary).
+    on reasoning payloads (primary signal when prefixed with
+    ``User message:``) and recent tool calls (secondary).
 
     This is a synchronous function — it blocks on the LLM call. When
     called from the IntentionBarrier, it runs in a thread executor to
@@ -140,6 +145,7 @@ def generate_intention(
         user_id: Tenant identifier.
         session_id: Session to update.
         event_bus: Optional EventBus for publishing session_updated events.
+        event_store: Optional EventStore for appending intention lifecycle events.
         intention_source: How the intention was set. Defaults to "user"
             (from user message via barrier). Use "bootstrap" for the
             one-time refinement from tool patterns.
@@ -159,16 +165,18 @@ def generate_intention(
         return None
 
     # Fetch tool calls and reasoning records separately to ensure
-    # balanced context regardless of record type distribution.
-    # Only reasoning rows prefixed with "User message:" count as user
-    # input for intention mutation; generic agent reasoning is not part
-    # of the user-driven intention model.
+    # balanced context regardless of record type distribution. Reasoning
+    # is the trusted intention channel; keep prefixes such as
+    # ``User message:`` intact so the model can distinguish sources.
     audit_store = AuditStore(db)
     recent_tools = audit_store.get_recent(
         session_id, user_id=user_id, limit=10, record_type="tool_call"
     )
     recent_reasoning = audit_store.get_recent(
-        session_id, user_id=user_id, limit=20, record_type="reasoning"
+        session_id,
+        user_id=user_id,
+        limit=_REASONING_CONTEXT_LIMIT,
+        record_type="reasoning",
     )
 
     if not recent_tools and not recent_reasoning and not decision_context:
@@ -194,21 +202,28 @@ def generate_intention(
                 brief = f": {args['path']}"
         tool_summary.append(f"  {tool}{brief} → {decision}")
 
-    # Extract user messages (chronological order — oldest first).
-    # Non-user reasoning is intentionally excluded from the intention
-    # prompt so stale agent narration cannot outweigh fresh user intent.
-    user_messages: list[str] = []
-    for record in reversed(recent_reasoning):
-        content = record.get("content", "")
-        if not content.startswith("User message:"):
+    # Render recent reasoning under a small budget. Fetch order is newest
+    # first; select from the newest entries, then render chronologically.
+    # User-message prefixes are preserved in this section. The latest user
+    # message is also extracted separately as the primary signal.
+    selected_reasoning: list[str] = []
+    latest_user_message: str | None = None
+    used_chars = 0
+    for record in recent_reasoning:
+        content = str(record.get("content") or "").strip()
+        if not content:
             continue
-        content = content[len("User message:") :].strip()
-        if content:
-            user_messages.append(content)
+        if latest_user_message is None and content.startswith("User message:"):
+            latest_user_message = content[len("User message:") :].strip() or None
+        remaining = _REASONING_CONTEXT_CHAR_BUDGET - used_chars
+        if remaining <= 0:
+            break
+        if len(content) > remaining:
+            content = content[: max(0, remaining - 3)] + "..."
+        selected_reasoning.append(content)
+        used_chars += len(content) + 4
 
-    latest_user_message = user_messages[-1] if user_messages else None
-    recent_user_messages = user_messages[-6:]
-    prior_user_messages = recent_user_messages[:-1] if latest_user_message else []
+    prior_reasoning_entries = list(reversed(selected_reasoning))
 
     # Build prompt with the latest user message as the primary signal.
     # All untrusted data is sanitized and wrapped in boundary tags.
@@ -255,13 +270,14 @@ def generate_intention(
             f"{wrap_with_boundary(safe_context, 'assistant_context')}"
         )
 
-    if prior_user_messages:
+    if prior_reasoning_entries:
         safe_msgs = "\n".join(
-            f"  - {sanitize_for_prompt(m)}" for m in prior_user_messages
+            f"  - {sanitize_for_prompt(m)}" for m in prior_reasoning_entries
         )
         prompt_parts.append(
-            f"Recent prior user messages (supporting context only):\n"
-            f"{wrap_with_boundary(safe_msgs, 'user_messages')}"
+            "Recent reasoning entries (trusted; lines starting with "
+            "'User message:' are the primary signal):\n"
+            f"{wrap_with_boundary(safe_msgs, 'reasoning_history')}"
         )
 
     if decision_context:
@@ -320,15 +336,21 @@ def generate_intention(
                 "- If the latest user message is clearly a different task or "
                 "topic, replace stale goals with that new active topic\n"
                 "- If the latest user message adds a new task while keeping the "
-                "current task alive, keep at most two active goals ordered "
+                "current task alive, keep at most four active goals ordered "
                 "newest first\n"
-                "- Let older secondary goals fade out when recent messages and "
-                "tools no longer support them\n"
+                "- Preserve active subscopes that have recent tool activity or "
+                "final human approvals until the user explicitly closes them\n"
+                "- Do not drop a repository, file, task name, or data source "
+                "that recent reasoning or tool activity still supports\n"
+                "- Let older secondary goals fade out only when recent reasoning "
+                "and tools no longer support them\n"
                 "- Resolve short referential replies such as 'ok do it', 'yes', "
                 "or 'push it' using the assistant context when it clearly "
                 "disambiguates them\n"
                 "- If a short reply cannot be resolved from context, keep the "
                 "prior active goal instead of inventing a new one\n"
+                "- For short confirmations, preserve all still-active subscopes "
+                "while adding the resolved latest action\n"
                 "- For long-lived sessions, focus on the most recent active "
                 "topic rather than accumulating every historical topic\n"
                 "- When a final human approval note expands scope, reflect "
@@ -336,7 +358,7 @@ def generate_intention(
                 "- When in doubt between stale history and a recent active "
                 "user request, prefer the recent active request\n"
                 "- Focus on goals, not tools used\n"
-                "- Keep at most two active goals in the intention text\n"
+                "- Keep at most four active goals in the intention text\n"
                 "- Keep the result to 2-3 sentences\n\n"
                 "Output only the JSON object, nothing else.\n\n"
                 f"{ANTI_INJECTION_PREAMBLE}"
@@ -394,6 +416,29 @@ def generate_intention(
                 event["title"] = title
             event_bus.publish(event)
 
+        if event_store is not None:
+            try:
+                event_store.append(
+                    user_id,
+                    session_id,
+                    [
+                        {
+                            "type": "lifecycle",
+                            "data": {
+                                "event": "intention_updated",
+                                "source": intention_source,
+                                "old_intention": old_intention,
+                                "new_intention": intention,
+                                "old_title": old_title or None,
+                                "new_title": title,
+                            },
+                        }
+                    ],
+                    source="intaris",
+                )
+            except Exception:
+                logger.debug("Failed to append intention_updated event", exc_info=True)
+
         return intention
     except Exception as e:
         logger.warning("Failed to generate intention: %s", e)
@@ -432,6 +477,7 @@ class IntentionBarrier:
         self._timeout = timeout_ms / 1000.0
         self._poll_timeout = poll_timeout_ms / 1000.0
         self._event_bus: Any | None = None
+        self._event_store: Any | None = None
         self._alignment_barrier: Any | None = None
         self._pending: dict[tuple[str, str], tuple[asyncio.Event, asyncio.Task]] = {}
 
@@ -461,6 +507,10 @@ class IntentionBarrier:
         Called after initialization since EventBus is created separately.
         """
         self._event_bus = event_bus
+
+    def set_event_store(self, event_store: Any) -> None:
+        """Set the EventStore reference for intention lifecycle events."""
+        self._event_store = event_store
 
     def set_alignment_barrier(self, alignment_barrier: Any) -> None:
         """Set the AlignmentBarrier reference for chaining re-checks.
@@ -755,6 +805,7 @@ class IntentionBarrier:
                     user_id=user_id,
                     session_id=session_id,
                     event_bus=self._event_bus,
+                    event_store=self._event_store,
                     context=context,
                     decision_context=decision_context,
                 ),
