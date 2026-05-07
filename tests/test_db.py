@@ -219,7 +219,9 @@ class TestAuditStore:
         assert record["decision"] == "approve"
         assert record["args_redacted"]["command"] == "ls -la"
 
-    def test_insert_does_not_refetch_record(self, audit_store, session_store, monkeypatch):
+    def test_insert_does_not_refetch_record(
+        self, audit_store, session_store, monkeypatch
+    ):
         self._create_session(session_store)
 
         def fail(*args, **kwargs):
@@ -1153,3 +1155,41 @@ class TestParentIntentionPrompt:
         messages = call_args[0][0]
         user_prompt = messages[1]["content"]
         assert "Parent Session Intention" not in user_prompt
+
+
+# ── Placeholder translation ─────────────────────────────────────────
+
+
+class TestTranslatePlaceholders:
+    """``_translate_placeholders`` adapts ``?`` placeholders to psycopg2.
+
+    Regression coverage for the pg_trgm ``%`` similarity operator: a
+    bare ``%`` in SQL must be doubled before psycopg2 sees it,
+    otherwise it gets interpreted as a format directive prefix and
+    walks off the end of the parameter tuple.
+    """
+
+    def test_translates_question_marks(self):
+        from intaris.db import _translate_placeholders
+
+        out = _translate_placeholders("SELECT * FROM t WHERE a = ? AND b = ?")
+        assert out == "SELECT * FROM t WHERE a = %s AND b = %s"
+
+    def test_escapes_pg_trgm_percent_operator(self):
+        from intaris.db import _translate_placeholders
+
+        out = _translate_placeholders(
+            "SELECT * FROM t WHERE intention % ? AND user_id = ?"
+        )
+        # ``%`` doubled to ``%%`` so psycopg2 preserves the literal
+        # operator; ``?`` placeholders translated to ``%s``.
+        assert out == ("SELECT * FROM t WHERE intention %% %s AND user_id = %s")
+
+    def test_placeholders_not_double_escaped(self):
+        """``%s`` introduced by translation must not become ``%%s``."""
+        from intaris.db import _translate_placeholders
+
+        # Multiple placeholders next to each other; no literal ``%``.
+        out = _translate_placeholders("INSERT INTO t (a, b, c) VALUES (?, ?, ?)")
+        assert "%%s" not in out
+        assert out.count("%s") == 3

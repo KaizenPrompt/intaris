@@ -31,10 +31,23 @@ logger = logging.getLogger(__name__)
 def _translate_placeholders(sql: str) -> str:
     """Translate ``?`` placeholders to ``%s`` for psycopg2.
 
-    Simple replacement that works because none of the SQL in the
-    codebase contains literal ``?`` characters in string constants.
+    psycopg2's pyformat paramstyle uses ``%s`` for placeholders and
+    treats any literal ``%`` in the SQL as a format directive prefix.
+    SQL containing the pg_trgm ``%`` similarity operator (or any
+    other literal ``%``) must therefore have those percent signs
+    doubled to ``%%`` so psycopg2 leaves them intact.
+
+    Order matters: escape literal ``%`` first, then translate ``?``
+    placeholders to ``%s``. Doing it in the other order would also
+    double-escape the placeholders we just introduced.
+
+    Works on every SQL string in the codebase because:
+      * No SQL string contains a literal ``?`` (we use ``?``
+        exclusively as the placeholder marker).
+      * No SQL string contains ``%%`` already (no caller has tried
+        to escape).
     """
-    return sql.replace("?", "%s")
+    return sql.replace("%", "%%").replace("?", "%s")
 
 
 # ── Row Wrapper ───────────────────────────────────────────────────────
