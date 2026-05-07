@@ -201,6 +201,58 @@ def test_split_pg_statements_handles_double_quotes():
     assert '"ix;weird"' in stmts[0]
 
 
+def test_extract_source_unwraps_coalesce_payload():
+    """Used by the tsvector fallback to rebuild the plain form when
+    the IMMUTABLE wrapper isn't installable."""
+    from intaris.search.schema import _extract_source
+
+    assert (
+        _extract_source("to_tsvector('simple', coalesce(intention,''))") == "intention"
+    )
+    assert (
+        _extract_source(
+            "to_tsvector('simple', intaris_immutable_unaccent(coalesce(content,'')))"
+        )
+        == "content"
+    )
+
+
+def test_tsvector_expression_picks_wrapper_when_available():
+    from intaris.search.schema import SearchSchema
+
+    s = SearchSchema(vector_enabled=False, embedding_dim=1536)
+    s.has_unaccent = True
+    s.has_immutable_unaccent = True
+    expr = s._tsvector_expression("intention")
+    assert "intaris_immutable_unaccent" in expr
+    assert "coalesce(intention,'')" in expr
+
+
+def test_tsvector_expression_falls_back_when_wrapper_missing():
+    from intaris.search.schema import SearchSchema
+
+    s = SearchSchema(vector_enabled=False, embedding_dim=1536)
+    s.has_unaccent = True
+    s.has_immutable_unaccent = False
+    expr = s._tsvector_expression("intention")
+    assert "intaris_immutable_unaccent" not in expr
+    assert "unaccent" not in expr
+    assert "coalesce(intention,'')" in expr
+
+
+def test_tsvector_expr_matches_collapses_whitespace():
+    """``pg_get_expr`` returns canonicalized SQL — comparison must be
+    whitespace/case insensitive."""
+    from intaris.search.schema import SearchSchema
+
+    a = "to_tsvector('simple', coalesce(intention,''))"
+    b = "to_tsvector('simple',  COALESCE(intention, ''))"
+    assert SearchSchema._tsvector_expr_matches(a, b)
+    assert not SearchSchema._tsvector_expr_matches(
+        a, "to_tsvector('simple', coalesce(content,''))"
+    )
+
+
 # ── Outbox ─────────────────────────────────────────────────────────
 
 

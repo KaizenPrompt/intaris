@@ -76,6 +76,35 @@ _PG_TRGM_INDEXES = [
 ]
 
 
+def _extract_source(expr: str) -> str:
+    """Return the inner ``coalesce(<col>,'')`` source from a tsvector
+    expression so the fallback path can rebuild the plain form.
+
+    Both expression flavors use the same ``coalesce(<source>,'')`` core,
+    so we slice it out via simple string scanning. Robust for our
+    constrained inputs (we never call this with arbitrary user SQL).
+    """
+    marker = "coalesce("
+    start = expr.find(marker)
+    if start < 0:
+        return expr
+    start += len(marker)
+    depth = 1
+    i = start
+    while i < len(expr) and depth > 0:
+        ch = expr[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    inner = expr[start:i]
+    # Drop the trailing ",''"
+    return inner.rsplit(",", 1)[0].strip()
+
+
 def _split_pg_statements(script: str) -> list[str]:
     """Split a SQL script into individual statements for psycopg2.
 
@@ -235,6 +264,14 @@ class SearchSchema:
         self.lexical_backend: str = "unknown"
         self.has_unaccent: bool = False
         self.has_pg_trgm: bool = False
+        # ``unaccent(text)`` is declared STABLE because the dictionary
+        # file can be reloaded at runtime, so PG rejects it inside
+        # generated column expressions which require IMMUTABLE. We
+        # work around it by creating a SQL wrapper function declared
+        # IMMUTABLE that defers to ``unaccent('unaccent', $1)``. When
+        # this flag is true, ``intaris_immutable_unaccent`` exists and
+        # the tsvector expressions reference it.
+        self.has_immutable_unaccent: bool = False
         self.has_pgvector: bool = False
         self.notes: list[str] = []
 
@@ -258,6 +295,14 @@ class SearchSchema:
 
             self.has_unaccent = self._pg_extension_present(cur, "unaccent")
             self.has_pg_trgm = self._pg_extension_present(cur, "pg_trgm")
+
+            # When ``unaccent`` is available, install an IMMUTABLE
+            # wrapper so the generated tsvector columns can fold
+            # diacritics without PG rejecting the expression.
+            if self.has_unaccent:
+                self.has_immutable_unaccent = self._create_immutable_unaccent_wrapper(
+                    cur
+                )
 
             self._ensure_pg_tsvector_columns(cur)
             self._ensure_pg_gin_indexes(cur)
@@ -298,36 +343,107 @@ class SearchSchema:
         )
 
     def _ensure_pg_tsvector_columns(self, cur: Any) -> None:
+        """Add or rebuild ``tsvector`` generated columns on canonical tables.
+
+        Expression selection:
+
+        - When ``intaris_immutable_unaccent`` is available, use
+          ``to_tsvector('simple', intaris_immutable_unaccent(coalesce(...,'')))``.
+        - Otherwise use the plain ``to_tsvector('simple', coalesce(...,''))``
+          form. Diacritic folding is not available on the tsvector
+          path in that case; queries still fold via ``pg_trgm`` /
+          Python normalization but recall is degraded.
+
+        For existing columns, we read the current generation
+        expression via ``pg_get_expr`` and rebuild the column +
+        GIN index when it doesn't match the desired expression. This
+        is the one-time migration path for deployments that booted
+        under the buggy "unaccent without wrapper" code and ended up
+        with the plain expression baked in.
+        """
+        desired_expr = self._tsvector_expression
         for table, column, source_expr in _PG_TSVECTOR_COLUMNS:
-            if self._pg_column_exists(cur, table, column):
+            target = desired_expr(source_expr)
+            existing_expr = self._pg_column_generation_expr(cur, table, column)
+            if existing_expr is None:
+                # Column doesn't exist — add fresh.
+                self._add_tsvector_column(cur, table, column, target)
                 continue
-            expr_unaccent = (
-                f"to_tsvector('simple', unaccent(coalesce({source_expr},'')))"
+            if self._tsvector_expr_matches(existing_expr, target):
+                continue
+            # Column exists with the wrong expression. Drop with
+            # CASCADE so any dependent GIN index goes away too —
+            # ``_ensure_pg_gin_indexes`` re-creates the index right
+            # after this method returns.
+            logger.info(
+                "Search: rebuilding %s.%s (generation expression changed: %s)",
+                table,
+                column,
+                "wrapper now available"
+                if self.has_immutable_unaccent
+                and "immutable_unaccent" not in (existing_expr or "")
+                else "configuration drift",
             )
-            expr_plain = f"to_tsvector('simple', coalesce({source_expr},''))"
-            expr = expr_unaccent if self.has_unaccent else expr_plain
-            sp = f"add_{table}_{column}"
-            cur.execute(f"SAVEPOINT {sp}")
-            try:
-                cur.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {column} tsvector "
-                    f"GENERATED ALWAYS AS ({expr}) STORED"
-                )
-                cur.execute(f"RELEASE SAVEPOINT {sp}")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Search: failed to add %s.%s with %s expression (%s); falling back",
-                    table,
-                    column,
-                    "unaccent" if self.has_unaccent else "plain",
-                    exc,
-                )
-                cur.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-                cur.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {column} tsvector "
-                    f"GENERATED ALWAYS AS ({expr_plain}) STORED"
-                )
-                self.has_unaccent = False
+            cur.execute(f"ALTER TABLE {table} DROP COLUMN {column} CASCADE")
+            self._add_tsvector_column(cur, table, column, target)
+
+    def _tsvector_expression(self, source_expr: str) -> str:
+        if self.has_immutable_unaccent:
+            return (
+                "to_tsvector('simple', "
+                f"intaris_immutable_unaccent(coalesce({source_expr},'')))"
+            )
+        return f"to_tsvector('simple', coalesce({source_expr},''))"
+
+    @staticmethod
+    def _tsvector_expr_matches(existing: str, desired: str) -> bool:
+        """Compare two PG-formatted generation expressions.
+
+        ``pg_get_expr`` returns a normalized form (extra whitespace
+        collapsed, type casts spelled out, etc). We strip whitespace
+        and compare token-collapsed versions to avoid false negatives
+        from cosmetic differences.
+        """
+
+        def _norm(s: str) -> str:
+            return "".join(s.split()).lower()
+
+        return _norm(existing) == _norm(desired)
+
+    def _add_tsvector_column(
+        self, cur: Any, table: str, column: str, expr: str
+    ) -> None:
+        """Add a tsvector generated column with the given expression.
+
+        On failure (typically: PG complains the expression isn't
+        IMMUTABLE because we didn't get the wrapper installed), we
+        fall back to the plain form once and degrade
+        ``has_immutable_unaccent`` so subsequent tables get the same
+        treatment without re-trying.
+        """
+        sp = f"add_{table}_{column}"
+        cur.execute(f"SAVEPOINT {sp}")
+        try:
+            cur.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} tsvector "
+                f"GENERATED ALWAYS AS ({expr}) STORED"
+            )
+            cur.execute(f"RELEASE SAVEPOINT {sp}")
+        except Exception as exc:  # noqa: BLE001
+            cur.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+            plain = f"to_tsvector('simple', coalesce({_extract_source(expr)},''))"
+            log = logger.warning if self.has_immutable_unaccent else logger.info
+            log(
+                "Search: %s.%s falls back to plain tsvector (%s)",
+                table,
+                column,
+                exc if self.has_immutable_unaccent else "no immutable unaccent wrapper",
+            )
+            cur.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} tsvector "
+                f"GENERATED ALWAYS AS ({plain}) STORED"
+            )
+            self.has_immutable_unaccent = False
 
     def _ensure_pg_gin_indexes(self, cur: Any) -> None:
         for index_name, table, column, where in _PG_GIN_INDEXES:
@@ -410,6 +526,63 @@ class SearchSchema:
             (table, column),
         )
         return cur.fetchone() is not None
+
+    @staticmethod
+    def _create_immutable_unaccent_wrapper(cur: Any) -> bool:
+        """Create the ``intaris_immutable_unaccent`` SQL wrapper.
+
+        ``unaccent(text)`` is declared STABLE in core PG; generated
+        columns require IMMUTABLE. We declare a wrapper IMMUTABLE
+        ourselves — operator's promise that the dictionary won't
+        change in a way that invalidates stored values. This is the
+        documented workaround.
+
+        Returns ``True`` when the wrapper exists in the current
+        database. Failures (typically: ``CREATE FUNCTION`` denied on
+        managed PG) are swallowed and we return ``False``; callers
+        fall back to the plain tsvector expression.
+        """
+        cur.execute("SAVEPOINT install_immutable_unaccent")
+        try:
+            cur.execute(
+                "CREATE OR REPLACE FUNCTION "
+                "intaris_immutable_unaccent(text) RETURNS text "
+                "AS $$ SELECT public.unaccent('public.unaccent', $1) $$ "
+                "LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE"
+            )
+            cur.execute("RELEASE SAVEPOINT install_immutable_unaccent")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "Search: intaris_immutable_unaccent wrapper not installed "
+                "(%s); diacritic folding via tsvector disabled",
+                type(exc).__name__,
+            )
+            cur.execute("ROLLBACK TO SAVEPOINT install_immutable_unaccent")
+            return False
+
+    @staticmethod
+    def _pg_column_generation_expr(cur: Any, table: str, column: str) -> str | None:
+        """Return the existing generation expression for a column, or None.
+
+        Used to detect drift between the desired and stored expression
+        when ``intaris_immutable_unaccent`` becomes available on a
+        deployment that previously fell back to the plain form.
+        """
+        cur.execute(
+            "SELECT pg_get_expr(d.adbin, d.adrelid) "
+            "FROM pg_attribute a "
+            "JOIN pg_attrdef d ON a.attrelid = d.adrelid "
+            "  AND a.attnum = d.adnum "
+            "WHERE a.attrelid = ?::regclass "
+            "  AND a.attname = ? "
+            "  AND a.attgenerated = 's'",
+            (table, column),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return str(row[0]) if row[0] is not None else None
 
     # ── SQLite ──
 
