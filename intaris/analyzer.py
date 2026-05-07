@@ -85,6 +85,12 @@ _TOOL_CALL_EST = 250
 # Overhead per partition (headers, stats, prior summary, etc.)
 _PARTITION_OVERHEAD = 2_000
 
+
+def _effective_window_budget() -> int:
+    """Return the usable user-prompt budget after fixed LLM overhead."""
+    return max(1_000, _MAX_WINDOW_CHARS - _CONTEXT_OVERHEAD)
+
+
 # ── Per-entry safety valves ───────────────────────────────────────────
 # Rarely-hit safeguards, not normal operating limits.  Most entries are
 # well below these thresholds.  When triggered, explicit truncation
@@ -298,6 +304,31 @@ def _apply_safety_valve(
             flag_str,
         )
     return f"{text[:limit]}... [{limit} of {len(text)} chars shown{flag_str}]"
+
+
+def _apply_prompt_budget(text: str, *, label: str) -> str:
+    """Last-resort whole-prompt safety valve.
+
+    Partitioners keep normal prompts under budget. This catches overhead
+    added after partitioning (prior summary, child summaries, headers) and
+    oversized atomic turns so providers reject fewer background summaries.
+    """
+    global _safety_valve_hits  # noqa: PLW0603
+
+    budget = _effective_window_budget()
+    if len(text) <= budget:
+        return text
+
+    _safety_valve_hits += 1
+    suffix = f"... [{budget} of {len(text)} chars shown; prompt budget enforced]"
+    keep = max(0, budget - len(suffix))
+    logger.info(
+        "Safety valve triggered: field=%s limit=%d actual=%d",
+        label,
+        budget,
+        len(text),
+    )
+    return f"{text[:keep]}{suffix}"
 
 
 def drain_safety_valve_hits() -> int:
@@ -634,6 +665,10 @@ def generate_summary(
                 child_sessions=child_data if i == len(partitions) - 1 else None,
                 conversation=p_conversation,
             )
+            user_prompt = _apply_prompt_budget(
+                user_prompt,
+                label="summary_prompt_event_enriched",
+            )
 
             try:
                 raw_response = llm.generate(
@@ -773,6 +808,10 @@ def generate_summary(
                 child_sessions=child_data
                 if i == len(fallback_partitions) - 1
                 else None,
+            )
+            user_prompt = _apply_prompt_budget(
+                user_prompt,
+                label="summary_prompt_audit_only",
             )
 
             try:
@@ -1834,18 +1873,24 @@ def _partition_into_windows(
         if unassigned_r:
             turns[-1]["reasoning"].extend(unassigned_r)
 
+    budget = _effective_window_budget()
+
     # ── Step 4: Compute actual size per turn ──────────────────────
     for turn in turns:
         conv_size = sum(
-            len(e.get("text", "")) + _ENTRY_OVERHEAD for e in turn["entries"]
+            min(len(e.get("text", "")), _ENTRY_CONTENT_LIMIT) + _ENTRY_OVERHEAD
+            for e in turn["entries"]
         )
         tc_size = len(turn["tool_calls"]) * _TOOL_CALL_EST
-        reas_size = sum(len(r.get("content", "")) + 30 for r in turn["reasoning"])
+        reas_size = sum(
+            min(len(r.get("content", "")), _ENTRY_CONTENT_LIMIT) + 30
+            for r in turn["reasoning"]
+        )
         turn["size"] = conv_size + tc_size + reas_size
 
     # ── Step 5: Check if everything fits in one window ────────────
     total_size = sum(t["size"] for t in turns) + _PARTITION_OVERHEAD
-    if total_size <= _MAX_WINDOW_CHARS:
+    if total_size <= budget:
         return [
             {
                 "conversation": conversation,
@@ -1868,7 +1913,7 @@ def _partition_into_windows(
         turn_size = turn["size"]
 
         # Would adding this turn exceed the budget?
-        if current_size + turn_size > _MAX_WINDOW_CHARS and current_conv:
+        if current_size + turn_size > budget and current_conv:
             # Finalize the current partition (ends with the previous
             # complete turn — never mid-turn, never with a dangling
             # user message since the previous turn's last entry is
@@ -1959,7 +2004,7 @@ def _partition_fallback_data(
     if not tool_calls and not user_messages and not reasoning:
         return []
 
-    budget = _MAX_WINDOW_CHARS - _CONTEXT_OVERHEAD
+    budget = _effective_window_budget()
 
     # Estimate total size.  _summarize_args can produce up to ~6 fields
     # at content_limit each, plus unbounded path fields.  Use a generous
@@ -2096,6 +2141,11 @@ def _build_conversation_section(
         ts = (entry.get("ts") or "")[:19]
         role = entry.get("role", "")
         text = entry.get("text", "")
+        text = _apply_safety_valve(
+            text,
+            _ENTRY_CONTENT_LIMIT,
+            label=f"conversation_{role or 'unknown'}",
+        )
 
         if role == "user":
             line = f'[{ts}] USER: "{text}"'
@@ -2570,6 +2620,7 @@ def _generate_compaction(
         child_sessions=child_data,
         session=session,
     )
+    user_prompt = _apply_prompt_budget(user_prompt, label="compaction_prompt")
 
     from intaris.llm import parse_json_response
     from intaris.prompts_analysis import (

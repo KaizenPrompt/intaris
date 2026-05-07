@@ -954,6 +954,37 @@ class TestPartitionIntoWindows:
         total = sum(len(p["conversation"]) for p in result)
         assert total == len(conv)
 
+    def test_uses_effective_budget(self, monkeypatch):
+        """Event partitions reserve overhead for system prompt/output tokens."""
+        import intaris.analyzer as analyzer
+
+        monkeypatch.setattr(analyzer, "_MAX_WINDOW_CHARS", 10_000)
+        conv = []
+        for i in range(3):
+            conv.append(
+                {
+                    "ts": f"2026-01-01T00:0{i}:00",
+                    "role": "user",
+                    "text": "x" * 900,
+                    "seq": i * 2,
+                }
+            )
+            conv.append(
+                {
+                    "ts": f"2026-01-01T00:0{i}:30",
+                    "role": "assistant",
+                    "text": "y" * 900,
+                    "seq": i * 2 + 1,
+                }
+            )
+
+        result = analyzer._partition_into_windows(
+            conv, [], [], window_start=self._WS, window_end=self._WE
+        )
+
+        assert len(result) > 1
+        assert sum(len(p["conversation"]) for p in result) == len(conv)
+
     def test_tool_calls_only(self):
         from intaris.analyzer import _partition_into_windows
 
@@ -971,7 +1002,8 @@ class TestPartitionIntoWindows:
         """An oversized turn exceeding the 150k window budget gets its own window."""
         from intaris.analyzer import _partition_into_windows
 
-        # Create a turn that exceeds the 150k budget (need ~160k total)
+        # Create a turn that exceeds the effective budget even after each
+        # individual entry is capped by the conversation safety valve.
         conv = [
             {"ts": "2026-01-01T00:00:00", "role": "user", "text": "small", "seq": 1},
             {
@@ -983,28 +1015,75 @@ class TestPartitionIntoWindows:
             {
                 "ts": "2026-01-01T00:01:00",
                 "role": "user",
-                "text": "x" * 80_000,
+                "text": "start oversized turn",
                 "seq": 3,
             },
-            {
-                "ts": "2026-01-01T00:01:01",
-                "role": "assistant",
-                "text": "y" * 80_000,
-                "seq": 4,
-            },
-            {"ts": "2026-01-01T00:02:00", "role": "user", "text": "small2", "seq": 5},
-            {
-                "ts": "2026-01-01T00:02:01",
-                "role": "assistant",
-                "text": "small2",
-                "seq": 6,
-            },
         ]
+        for i in range(35):
+            conv.append(
+                {
+                    "ts": f"2026-01-01T00:01:{i + 1:02d}",
+                    "role": "assistant",
+                    "text": "y" * 80_000,
+                    "seq": 4 + i,
+                }
+            )
+        conv.extend(
+            [
+                {
+                    "ts": "2026-01-01T00:02:00",
+                    "role": "user",
+                    "text": "small2",
+                    "seq": 100,
+                },
+                {
+                    "ts": "2026-01-01T00:02:01",
+                    "role": "assistant",
+                    "text": "small2",
+                    "seq": 101,
+                },
+            ]
+        )
         result = _partition_into_windows(
             conv, [], [], window_start=self._WS, window_end=self._WE
         )
         assert len(result) >= 2
-        assert sum(len(p["conversation"]) for p in result) == 6
+        assert sum(len(p["conversation"]) for p in result) == len(conv)
+
+    def test_prompt_budget_caps_oversized_atomic_turn(self, monkeypatch):
+        """A single huge turn is explicitly capped before the LLM call."""
+        import intaris.analyzer as analyzer
+
+        monkeypatch.setattr(analyzer, "_MAX_WINDOW_CHARS", 10_000)
+        prompt = analyzer._build_summary_prompt(
+            intention="Implement auth",
+            intention_source="user",
+            window_start=self._WS,
+            window_end=self._WE,
+            window_number=1,
+            tool_calls=[],
+            user_messages=[],
+            agent_reasoning=[],
+            prior_summary=None,
+            conversation=[
+                {
+                    "ts": "2026-01-01T00:00:00",
+                    "role": "user",
+                    "text": "Summarize this output",
+                    "seq": 1,
+                },
+                {
+                    "ts": "2026-01-01T00:00:01",
+                    "role": "assistant",
+                    "text": "x" * 50_000,
+                    "seq": 2,
+                },
+            ],
+        )
+        capped = analyzer._apply_prompt_budget(prompt, label="test_prompt")
+
+        assert len(capped) <= analyzer._effective_window_budget()
+        assert "prompt budget enforced" in capped
 
     def test_tool_calls_assigned_by_timestamp(self):
         from intaris.analyzer import _partition_into_windows
