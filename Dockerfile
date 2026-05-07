@@ -22,6 +22,14 @@ RUN uv pip install --system --no-cache ".[postgresql]" \
 COPY intaris/ intaris/
 RUN uv pip install --system --no-cache --no-deps .
 
+# Pre-download BM25 sparse embedding model into the image so containers
+# start without network dependency (Kubernetes pods lose cache on
+# restart). FastEmbed caches the model files relative to the current
+# working directory by default, so they land in /app/fastembed_cache
+# and survive in the image layer. Without this, every pod restart
+# would re-fetch the assets from HuggingFace Hub.
+RUN python -c "from fastembed import SparseTextEmbedding; SparseTextEmbedding(model_name='Qdrant/bm25')"
+
 # Data directory for database and logs.
 ENV DATA_DIR=/data
 RUN mkdir -p /data
