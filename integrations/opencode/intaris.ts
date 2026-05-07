@@ -447,13 +447,17 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
    * Expands ~ to home directory and converts each path to a glob pattern.
    * E.g., "~/src" → "/Users/name/src/*"
    *
-   * Always includes ~/.local/share/opencode/* (tool output storage)
-   * so reads of truncated output files are never blocked.
+   * Always includes ~/.local/share/opencode/* (tool output storage),
+   * common OS temp directories, and $TMPDIR so transient scratch
+   * artifacts created by shell commands do not look out-of-policy.
    */
   function buildPolicy(): Record<string, any> | null {
     const home = process.env.HOME || process.env.USERPROFILE || ""
-    // Always allow reads from OpenCode's tool output directory and the project directory
-    const builtinPaths: string[] = []
+    const builtinPaths: string[] = ["/tmp/*", "/var/tmp/*"]
+    const tmpDir = process.env.TMPDIR
+    if (tmpDir) {
+      builtinPaths.push(`${tmpDir.replace(/\/$/, "")}/*`)
+    }
     if (home) {
       builtinPaths.push(`${home}/.local/share/opencode/*`)
     }

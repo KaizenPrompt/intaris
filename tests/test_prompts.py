@@ -16,6 +16,7 @@ from intaris.prompts import (
     SAFETY_EVALUATION_SCHEMA,
     SAFETY_EVALUATION_SYSTEM_PROMPT,
     build_evaluation_user_prompt,
+    render_recent_reasoning_section,
     render_user_decisions_section,
 )
 from intaris.prompts_analysis import (
@@ -197,6 +198,57 @@ class TestUserDecisionsPromptRendering:
         assert "prior_reasoning" not in section
 
 
+class TestRecentReasoningPromptRendering:
+    def test_render_recent_reasoning_section_wraps_context(self):
+        section = render_recent_reasoning_section(
+            [
+                {
+                    "timestamp": "2026-05-07T10:51:33Z",
+                    "content": (
+                        "Plan context: add context_type to search_conversations "
+                        "and pass it through to grouped search results."
+                    ),
+                    "args_redacted": {"context": "Assistant proposed backend tool update."},
+                }
+            ]
+        )
+
+        assert section is not None
+        assert "## Recent Reasoning" in section
+        assert "⟨reasoning_history⟩" in section
+        assert "context_type" in section
+        assert "Assistant proposed backend tool update" in section
+
+    def test_build_prompt_includes_recent_reasoning_section(self):
+        prompt = build_evaluation_user_prompt(
+            intention="Finalize search UI changes",
+            policy=None,
+            recent_history=[],
+            recent_reasoning=[
+                {
+                    "timestamp": "2026-05-07T10:51:33Z",
+                    "content": (
+                        "Plan context: LLM tool surface requires optional "
+                        "context_type parameter."
+                    ),
+                }
+            ],
+            session_stats={
+                "total_calls": 1,
+                "approved_count": 1,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="edit",
+            args={"filePath": "cognis/tools/builtin/conversations.py"},
+            agent_id="opencode",
+        )
+
+        assert "## Recent Reasoning" in prompt
+        assert "LLM tool surface" in prompt
+        assert "⟨reasoning_history⟩" in prompt
+
+
 class TestEvaluatorScopeRules:
     """The L1 evaluator must focus on operational safety, not topic or
     tool-argument quality. These regression tests guard the prompt rules
@@ -233,6 +285,18 @@ class TestEvaluatorScopeRules:
         )
         assert "subject matter" in SAFETY_EVALUATION_SYSTEM_PROMPT
 
+    def test_prompt_mentions_recent_reasoning_as_context(self):
+        assert "Recent reasoning records" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        assert "compressed" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        assert "contextual evidence" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        assert "low/medium-risk source edits" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        assert "tooling, schema, or API subtask" in SAFETY_EVALUATION_SYSTEM_PROMPT
+
+    def test_prompt_approves_routine_validation_commands(self):
+        assert "Routine project validation commands" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        assert "npm test" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        assert "recent human-approved scope expansion" in SAFETY_EVALUATION_SYSTEM_PROMPT
+
 
 class TestJudgeScopeRules:
     """The judge must mirror the L1 scope rules — same operational-only focus."""
@@ -254,6 +318,13 @@ class TestJudgeScopeRules:
         assert "operational safety" in _DECISION_RULES_ADVISORY
         assert "Do NOT moderate by topic" in _DECISION_RULES_ADVISORY
         assert "Approve" in _DECISION_RULES_ADVISORY
+
+    def test_judge_advisory_approves_in_project_edits_with_plan_context(self):
+        from intaris.judge import _DECISION_RULES_ADVISORY
+
+        assert "Medium-risk in-project source edits" in _DECISION_RULES_ADVISORY
+        assert "recent reasoning" in _DECISION_RULES_ADVISORY
+        assert "not directly aligned" in _DECISION_RULES_ADVISORY
 
     def test_judge_advisory_deny_excludes_topic_only(self):
         from intaris.judge import _DECISION_RULES_ADVISORY

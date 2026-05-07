@@ -922,6 +922,9 @@ class Evaluator:
         recent_history = self._audit.get_recent(
             session_id, user_id=user_id, limit=10, record_type="tool_call"
         )
+        recent_reasoning = self._audit.get_recent(
+            session_id, user_id=user_id, limit=4, record_type="reasoning"
+        )
         user_decisions = self._audit.get_user_decisions(
             session_id, user_id=user_id, limit=5
         )
@@ -930,6 +933,7 @@ class Evaluator:
             intention=session["intention"],
             policy=session.get("policy"),
             recent_history=recent_history,
+            recent_reasoning=recent_reasoning,
             user_decisions=user_decisions,
             session_stats={
                 "total_calls": session.get("total_calls", 0),

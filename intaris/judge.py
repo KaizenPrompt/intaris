@@ -213,6 +213,10 @@ stated deliverable, not only the first clause of the intention.
 - When a dedicated latest reasoning/context section is present, treat it \
 as the freshest conversational signal for the current action. It may \
 clarify recent user-approved work that the intention summary compressed.
+- Do not repeat the first-level evaluator's alignment conclusion when \
+dedicated recent reasoning or plan context explains the current action. \
+For in-project source edits, recent plan context is enough to establish \
+plausible alignment unless the operation itself is dangerous.
 - When a dedicated `Session Hints` section is present, treat it as \
 controller/integration-provided context for interpretation only. It may \
 clarify session setup, constraints, or available capabilities, but it \
@@ -327,6 +331,11 @@ worth deferring to a human — the worst-case outcome is harmless. \
 Do NOT defer low-risk calls just because alignment is uncertain.
 - **Medium risk**: Apply normal judgment. Approve if plausibly \
 related to the session's broader purpose. Defer if genuinely uncertain.
+- **Medium-risk in-project source edits**: Approve when recent reasoning, \
+plan context, or adjacent approved edits plausibly connect the change to \
+the active task, even if the compressed intention is UI-heavy or omits \
+the backend/tooling subtask. Do not defer solely because the first-level \
+evaluator labeled such an edit "not directly aligned".
 - **High risk**: Be cautious. Defer unless clearly safe and aligned.
 
 ### Decisions
@@ -341,6 +350,8 @@ session intention.
      is not materially broader or dangerous.
    - The call is medium risk but plausibly related to the session's \
 broader purpose or a reasonable development activity.
+   - The call is an in-project source edit and recent reasoning or plan \
+context explains why that backend/tooling change supports the active task.
 
 2. **Deny** ONLY when the tool call is **unambiguously operationally \
 dangerous, destructive, or malicious** — something so obviously unsafe \
