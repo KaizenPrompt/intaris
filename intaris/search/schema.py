@@ -76,6 +76,16 @@ _PG_TRGM_INDEXES = [
 ]
 
 
+# Tables whose generated tsvector columns we will NOT auto-rebuild on a
+# running deployment because the rewrite takes an ACCESS EXCLUSIVE lock
+# and blocks the lifespan startup long enough to fail K8s liveness
+# probes. For these, drift is logged and the operator must run the
+# manual ``ALTER TABLE`` themselves during a maintenance window. The
+# threshold is conservative: 50k rows of audit content is enough to
+# rewrite slower than a 60-second probe budget on a busy DB.
+_PG_AUTO_REBUILD_ROW_THRESHOLD = 50_000
+
+
 def _extract_source(expr: str) -> str:
     """Return the inner ``coalesce(<col>,'')`` source from a tsvector
     expression so the fallback path can rebuild the plain form.
@@ -355,34 +365,78 @@ class SearchSchema:
           Python normalization but recall is degraded.
 
         For existing columns, we read the current generation
-        expression via ``pg_get_expr`` and rebuild the column +
-        GIN index when it doesn't match the desired expression. This
-        is the one-time migration path for deployments that booted
-        under the buggy "unaccent without wrapper" code and ended up
-        with the plain expression baked in.
+        expression via ``pg_get_expr`` and check whether it agrees
+        with the desired flavor (wrapper vs plain) on the same source
+        column. This is intentionally a *semantic* check, not a
+        textual one: ``pg_get_expr`` returns canonicalized SQL
+        (``'simple'::regconfig``, ``COALESCE``, ``''::text``) that
+        will never match a hand-authored expression byte-for-byte, so
+        we'd rebuild on every startup if we compared text.
+
+        When drift is detected on a table whose live row count exceeds
+        ``_PG_AUTO_REBUILD_ROW_THRESHOLD``, we log a notice with the
+        manual SQL the operator can run and continue without
+        rebuilding. ``ALTER TABLE ... DROP COLUMN`` plus
+        ``ADD COLUMN ... GENERATED STORED`` rewrites the entire table
+        under an ACCESS EXCLUSIVE lock; on a busy deployment with a
+        large ``audit_log`` this can run long enough that K8s liveness
+        probes kill the pod, putting the cluster in a restart loop.
         """
         desired_expr = self._tsvector_expression
         for table, column, source_expr in _PG_TSVECTOR_COLUMNS:
             target = desired_expr(source_expr)
             existing_expr = self._pg_column_generation_expr(cur, table, column)
             if existing_expr is None:
-                # Column doesn't exist — add fresh.
+                # Column doesn't exist — add fresh. We accept the
+                # one-time rewrite cost here because there's no other
+                # way to add a generated column. Operators of huge
+                # tables can pre-create the column manually before
+                # rolling out the search-enabled image to skip this.
                 self._add_tsvector_column(cur, table, column, target)
                 continue
-            if self._tsvector_expr_matches(existing_expr, target):
+            if self._tsvector_expr_matches(
+                existing_expr, target, source_expr=source_expr
+            ):
                 continue
-            # Column exists with the wrong expression. Drop with
+            # Column exists with a different flavor than desired.
+            row_count = self._pg_table_rowcount(cur, table)
+            if row_count is not None and row_count > _PG_AUTO_REBUILD_ROW_THRESHOLD:
+                manual_sql = (
+                    f"ALTER TABLE {table} DROP COLUMN {column} CASCADE; "
+                    f"ALTER TABLE {table} ADD COLUMN {column} tsvector "
+                    f"GENERATED ALWAYS AS ({target}) STORED;"
+                )
+                logger.warning(
+                    "Search: %s.%s tsvector flavor mismatch (existing=%s desired=%s); "
+                    "table has ~%d rows (>%d) — skipping auto-rebuild to avoid "
+                    "blocking startup. Run during a maintenance window: %s",
+                    table,
+                    column,
+                    "wrapper"
+                    if "intaris_immutable_unaccent" in existing_expr.lower()
+                    else "plain",
+                    "wrapper" if self.has_immutable_unaccent else "plain",
+                    row_count,
+                    _PG_AUTO_REBUILD_ROW_THRESHOLD,
+                    manual_sql,
+                )
+                self.notes.append(
+                    f"{table}.{column} tsvector rebuild deferred ({row_count} rows)"
+                )
+                continue
+            # Small table — safe to rebuild synchronously. Drop with
             # CASCADE so any dependent GIN index goes away too —
             # ``_ensure_pg_gin_indexes`` re-creates the index right
             # after this method returns.
             logger.info(
-                "Search: rebuilding %s.%s (generation expression changed: %s)",
+                "Search: rebuilding %s.%s (tsvector flavor change: %s -> %s, %d rows)",
                 table,
                 column,
-                "wrapper now available"
-                if self.has_immutable_unaccent
-                and "immutable_unaccent" not in (existing_expr or "")
-                else "configuration drift",
+                "wrapper"
+                if "intaris_immutable_unaccent" in existing_expr.lower()
+                else "plain",
+                "wrapper" if self.has_immutable_unaccent else "plain",
+                row_count or 0,
             )
             cur.execute(f"ALTER TABLE {table} DROP COLUMN {column} CASCADE")
             self._add_tsvector_column(cur, table, column, target)
@@ -396,19 +450,93 @@ class SearchSchema:
         return f"to_tsvector('simple', coalesce({source_expr},''))"
 
     @staticmethod
-    def _tsvector_expr_matches(existing: str, desired: str) -> bool:
-        """Compare two PG-formatted generation expressions.
+    def _tsvector_expr_matches(
+        existing: str, desired: str, *, source_expr: str | None = None
+    ) -> bool:
+        """Decide whether an existing tsvector generation expression
+        matches the desired one for our purposes.
 
-        ``pg_get_expr`` returns a normalized form (extra whitespace
-        collapsed, type casts spelled out, etc). We strip whitespace
-        and compare token-collapsed versions to avoid false negatives
-        from cosmetic differences.
+        We do NOT do textual comparison. ``pg_get_expr`` returns
+        canonicalized SQL that adds type casts (``'simple'::regconfig``,
+        ``''::text``) and uppercases function names (``COALESCE``),
+        which would never match the hand-authored ``desired`` string
+        even after whitespace + case normalization — that bug caused
+        every startup to drop and rebuild every tsvector column,
+        triggering full table rewrites under ACCESS EXCLUSIVE locks.
+
+        Instead we compare semantic features:
+
+        1. Both must reference the same source column. We scan for the
+           source identifier inside ``coalesce(...)`` on each side.
+        2. Both must agree on whether to use the ``intaris_immutable_unaccent``
+           wrapper. That is the only flavor difference our code
+           generates.
+
+        Anything else PG might canonicalize is fine — we wrote the
+        original expression ourselves on a previous run.
         """
 
-        def _norm(s: str) -> str:
-            return "".join(s.split()).lower()
+        def _has_wrapper(s: str) -> bool:
+            return "intaris_immutable_unaccent" in s.lower()
 
-        return _norm(existing) == _norm(desired)
+        def _references_column(s: str, col: str) -> bool:
+            # Match ``col`` as a whole word. Lowercased on both sides
+            # because PG canonicalizes ``coalesce`` to ``COALESCE`` and
+            # similar.
+            text = s.lower()
+            target = col.lower()
+            idx = 0
+            while True:
+                idx = text.find(target, idx)
+                if idx < 0:
+                    return False
+                left_ok = idx == 0 or not (
+                    text[idx - 1].isalnum() or text[idx - 1] == "_"
+                )
+                end = idx + len(target)
+                right_ok = end == len(text) or not (
+                    text[end].isalnum() or text[end] == "_"
+                )
+                if left_ok and right_ok:
+                    return True
+                idx = end
+
+        if _has_wrapper(existing) != _has_wrapper(desired):
+            return False
+        if source_expr is None:
+            # Best-effort: extract the source column from the desired
+            # expression by walking ``coalesce(<source>,...)``.
+            source_expr = _extract_source(desired)
+        if not source_expr:
+            return True
+        return _references_column(existing, source_expr)
+
+    @staticmethod
+    def _pg_table_rowcount(cur: Any, table: str) -> int | None:
+        """Return the cached live-tuple count for ``table``, or None.
+
+        Uses ``pg_stat_user_tables.n_live_tup`` which is fast (constant
+        time) and good enough for a "is this table small or large"
+        decision. ANALYZE keeps it accurate within a few percent of
+        ``COUNT(*)`` on busy tables.
+        """
+        try:
+            cur.execute(
+                "SELECT n_live_tup FROM pg_stat_user_tables WHERE relname = ?",
+                (table,),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Search: pg_stat_user_tables lookup failed for %s (%s)", table, exc
+            )
+            return None
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            return None
+        try:
+            return int(row[0])
+        except (TypeError, ValueError):
+            return None
 
     def _add_tsvector_column(
         self, cur: Any, table: str, column: str, expr: str
