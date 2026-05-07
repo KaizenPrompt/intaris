@@ -95,6 +95,7 @@ def client(e2e_env):
 # ---------------------------------------------------------------------------
 
 _DEFAULT_USER = "e2e-user"
+_DEFAULT_AGENT = "test-agent"
 _HEADERS = {"X-User-Id": _DEFAULT_USER}
 
 
@@ -119,7 +120,7 @@ def _create_session(
     resp = client.post(
         "/api/v1/intention",
         json=body,
-        headers={"X-User-Id": user_id, "X-Agent-Id": "test-agent"},
+        headers={"X-User-Id": user_id, "X-Agent-Id": _DEFAULT_AGENT},
     )
     assert resp.status_code == 200, f"Session creation failed: {resp.text}"
 
@@ -1364,7 +1365,7 @@ class TestL3AnalysisPipeline:
             "user_id": _DEFAULT_USER,
             "payload": {
                 "triggered_by": "manual",
-                "agent_id": "",
+                "agent_id": _DEFAULT_AGENT,
                 "lookback_days": 30,
             },
         }
@@ -1426,7 +1427,7 @@ class TestL3AnalysisPipeline:
                 "user_id": _DEFAULT_USER,
                 "payload": {
                     "triggered_by": "manual",
-                    "agent_id": "",
+                    "agent_id": _DEFAULT_AGENT,
                     "lookback_days": 30,
                 },
             },
@@ -1555,7 +1556,7 @@ def _do_generate_summary(
 def _do_run_analysis(
     *,
     user_id: str = _DEFAULT_USER,
-    agent_id: str = "",
+    agent_id: str = _DEFAULT_AGENT,
 ) -> dict:
     """Run L3 cross-session analysis using real LLM. Returns result dict."""
     from intaris.analyzer import run_analysis
