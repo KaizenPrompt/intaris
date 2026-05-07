@@ -77,11 +77,11 @@
        class="min-h-screen flex flex-col">
 
     <!-- ── Top Navigation ──────────────────────────────────── -->
-    <nav class="bg-brand-surface border-b border-brand-border sticky top-0 z-30">
-      <div class="max-w-[1600px] mx-auto px-4 sm:px-6">
-        <div class="flex items-center justify-between h-14">
+    <nav class="bg-brand-surface border-b border-brand-border sticky top-0 z-30" x-data="{ accountOpen: false }">
+      <div class="max-w-[1600px] mx-auto px-4 sm:px-6 py-2 space-y-2 min-w-0">
+        <div class="flex items-center justify-between gap-3 min-w-0">
           <!-- Brand + Live indicator -->
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-2 shrink-0">
             <span class="text-xl font-bold text-brand-accent">intaris</span>
             <span x-show="$store.ws.connected"
                   class="w-2 h-2 rounded-full bg-green-500 shrink-0" title="Live updates active"></span>
@@ -89,8 +89,70 @@
                   class="w-2 h-2 rounded-full bg-zinc-500 shrink-0" title="No live connection"></span>
           </div>
 
-          <!-- Tab Navigation -->
-          <div class="flex items-center gap-1">
+          <!-- Account menu -->
+          <div class="relative shrink-0" @keydown.escape.window="accountOpen = false" @click.outside="accountOpen = false">
+            <button @click="accountOpen = !accountOpen"
+                    class="flex items-center gap-2 rounded-full border border-brand-border bg-brand-elevated/80 py-1 pl-1 pr-2 text-sm text-secondary transition-all duration-200 hover:border-brand-accent/50 hover:text-[#E6EDF3] focus:outline-none focus:border-brand-accent focus:ring-1 focus:ring-brand-accent/30"
+                    :aria-expanded="accountOpen.toString()"
+                    aria-label="Account menu">
+              <span class="flex h-8 w-8 items-center justify-center rounded-full bg-brand-accent/15 text-sm font-semibold text-brand-accent"
+                    x-text="($store.auth.selectedUser || $store.auth.identity?.user_id || '?').slice(0, 1).toUpperCase()"></span>
+              <span class="hidden max-w-[12rem] truncate sm:block"
+                    x-text="$store.auth.selectedUser || $store.auth.identity?.user_id || 'Account'"></span>
+              <svg class="h-4 w-4 text-muted transition-transform duration-200" :class="accountOpen ? 'rotate-180' : ''" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
+              </svg>
+            </button>
+
+            <div x-show="accountOpen"
+                 x-cloak
+                 x-transition.origin.top.right
+                 class="absolute right-0 mt-2 w-80 max-w-[calc(100vw-2rem)] rounded-xl border border-brand-border bg-brand-surface p-3 shadow-2xl shadow-black/30">
+              <div class="mb-3 min-w-0 border-b border-brand-border pb-3">
+                <div class="text-xs uppercase tracking-wide text-muted">Signed in as</div>
+                <div class="truncate text-sm font-medium text-[#E6EDF3]"
+                     x-text="$store.auth.selectedUser || $store.auth.identity?.user_id || 'Unknown user'"></div>
+              </div>
+
+              <div class="space-y-3">
+                <!-- User Switcher (only for wildcard keys) -->
+                <template x-if="$store.auth.identity?.can_switch_user && $store.auth.users.length > 1">
+                  <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-secondary">User</span>
+                    <select class="select w-full text-sm py-1.5"
+                            :value="$store.auth.selectedUser"
+                            @change="$store.auth.switchUser($event.target.value)">
+                      <template x-for="u in $store.auth.users" :key="u">
+                        <option :value="u" x-text="u" :selected="u === $store.auth.selectedUser"></option>
+                      </template>
+                    </select>
+                  </label>
+                </template>
+
+                <!-- Agent Filter -->
+                <template x-if="$store.nav.agents.length > 0">
+                  <label class="block">
+                    <span class="mb-1 block text-xs font-medium text-secondary">Agent</span>
+                    <select class="select w-full text-sm py-1.5"
+                            :value="$store.nav.selectedAgent"
+                            @change="$store.nav.setAgent($event.target.value)">
+                      <option value="">All Agents</option>
+                      <template x-for="a in $store.nav.agents" :key="a">
+                        <option :value="a" x-text="a" :selected="a === $store.nav.selectedAgent"></option>
+                      </template>
+                    </select>
+                  </label>
+                </template>
+
+                <button @click="$store.auth.logout()" class="btn-ghost flex w-full justify-center text-sm">Logout</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab Navigation -->
+        <div class="min-w-0 overflow-x-auto scrollbar-none">
+          <div class="flex min-w-max items-center gap-1">
             <template x-for="tab in [
               { id: 'dashboard', label: 'Dashboard' },
               { id: 'sessions', label: 'Sessions' },
@@ -111,36 +173,6 @@
                              rounded-full bg-red-500 text-white text-[10px] font-bold leading-none px-1"></span>
               </button>
             </template>
-          </div>
-
-          <!-- User & Agent & Logout -->
-          <div class="flex items-center gap-3">
-            <!-- User Switcher (only for wildcard keys) -->
-            <template x-if="$store.auth.identity?.can_switch_user && $store.auth.users.length > 1">
-              <select class="select text-sm py-1.5"
-                      :value="$store.auth.selectedUser"
-                      @change="$store.auth.switchUser($event.target.value)">
-                <template x-for="u in $store.auth.users" :key="u">
-                  <option :value="u" x-text="u" :selected="u === $store.auth.selectedUser"></option>
-                </template>
-              </select>
-            </template>
-
-            <!-- Agent Filter -->
-            <template x-if="$store.nav.agents.length > 0">
-              <select class="select text-sm py-1.5"
-                      :value="$store.nav.selectedAgent"
-                      @change="$store.nav.setAgent($event.target.value)">
-                <option value="">All Agents</option>
-                <template x-for="a in $store.nav.agents" :key="a">
-                  <option :value="a" x-text="a" :selected="a === $store.nav.selectedAgent"></option>
-                </template>
-              </select>
-            </template>
-
-            <span class="text-sm text-secondary" x-text="$store.auth.selectedUser || $store.auth.identity?.user_id || ''"></span>
-
-            <button @click="$store.auth.logout()" class="btn-ghost text-sm">Logout</button>
           </div>
         </div>
       </div>

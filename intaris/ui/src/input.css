@@ -155,7 +155,7 @@
   }
 
   .tab-btn {
-    @apply px-4 py-2 text-sm font-medium rounded-lg transition-all duration-200
+    @apply shrink-0 whitespace-nowrap px-3 sm:px-4 py-2 text-sm font-medium rounded-lg transition-all duration-200
            text-[#94A3B8] hover:text-[#E6EDF3] hover:bg-brand-elevated;
   }
 
@@ -171,6 +171,14 @@
   .toast-error { @apply bg-red-500/15 border-red-500/30 text-red-300; }
   .toast-info { @apply bg-sky-500/15 border-sky-500/30 text-sky-300; }
   .toast-warning { @apply bg-amber-500/15 border-amber-500/30 text-amber-300; }
+
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
 
   .modal-overlay {
     @apply fixed inset-0 bg-black/60 backdrop-blur-sm z-50
