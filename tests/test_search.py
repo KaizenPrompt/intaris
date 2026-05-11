@@ -1102,6 +1102,81 @@ def test_qdrant_upsert_and_search(qdrant_local):
     assert refs and refs[0] == "r1"
 
 
+def test_qdrant_search_accepts_iso_timestamp_filters(qdrant_local):
+    backend = qdrant_local
+    backend.upsert(
+        user_id=TEST_USER,
+        session_id="s1",
+        kind=KIND_INTENTION,
+        ref_id="r1",
+        text="rocket",
+        ts="2026-04-01T00:00:00Z",
+        agent_id="agent-1",
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+    backend.upsert(
+        user_id=TEST_USER,
+        session_id="s2",
+        kind=KIND_INTENTION,
+        ref_id="r2",
+        text="rocket",
+        ts="2026-04-02T00:00:00Z",
+        agent_id="agent-1",
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+
+    matches = backend.search(
+        user_id=TEST_USER,
+        q="rocket",
+        embedding=[1.0, 0.0, 0.0, 0.0],
+        kinds=[KIND_INTENTION],
+        filters={
+            "from_ts": "2026-04-01T12:00:00+00:00",
+            "to_ts": "2026-04-02T23:59:59+00:00",
+        },
+        limit=5,
+    )
+
+    assert {m.ref_id for m in matches} == {"r2"}
+
+
+def test_qdrant_search_uses_datetime_range_for_timestamp_filters(qdrant_local):
+    from qdrant_client.http import models as qmodels
+
+    backend = qdrant_local
+    captured: dict[str, object] = {}
+    original_query_points = backend._client.query_points
+
+    def capture_query_points(*args, **kwargs):
+        captured["query_filter"] = kwargs["query_filter"]
+        return original_query_points(*args, **kwargs)
+
+    backend._client.query_points = capture_query_points
+    backend.upsert(
+        user_id=TEST_USER,
+        session_id="s1",
+        kind=KIND_INTENTION,
+        ref_id="r1",
+        text="rocket",
+        ts="2026-04-01T00:00:00Z",
+        agent_id="agent-1",
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+
+    backend.search(
+        user_id=TEST_USER,
+        q="rocket",
+        embedding=[1.0, 0.0, 0.0, 0.0],
+        kinds=[KIND_INTENTION],
+        filters={"from_ts": "2026-04-01T00:00:00Z"},
+        limit=5,
+    )
+
+    conditions = captured["query_filter"].must
+    ts_condition = next(condition for condition in conditions if condition.key == "ts")
+    assert isinstance(ts_condition.range, qmodels.DatetimeRange)
+
+
 def test_qdrant_user_scope(qdrant_local):
     backend = qdrant_local
     backend.upsert(

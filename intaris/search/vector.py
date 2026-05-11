@@ -20,10 +20,25 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Iterable, Protocol
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_qdrant_datetime(value: Any) -> datetime | None:
+    """Convert ISO timestamps to datetimes for Qdrant datetime filters."""
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        logger.warning("qdrant: ignoring invalid timestamp filter %r", value)
+        return None
 
 
 @dataclass
@@ -439,6 +454,7 @@ class QdrantVectorBackend:
                     ("agent_id", self._qmodels.PayloadSchemaType.KEYWORD),
                     ("session_id", self._qmodels.PayloadSchemaType.KEYWORD),
                     ("kind", self._qmodels.PayloadSchemaType.KEYWORD),
+                    ("ts", self._qmodels.PayloadSchemaType.DATETIME),
                 ):
                     try:
                         self._client.create_payload_index(
@@ -607,14 +623,18 @@ class QdrantVectorBackend:
             )
         if filters.get("from_ts") or filters.get("to_ts"):
             range_kwargs: dict[str, Any] = {}
-            if filters.get("from_ts"):
-                range_kwargs["gte"] = filters["from_ts"]
-            if filters.get("to_ts"):
-                range_kwargs["lte"] = filters["to_ts"]
+            from_ts = _parse_qdrant_datetime(filters.get("from_ts"))
+            to_ts = _parse_qdrant_datetime(filters.get("to_ts"))
+            if from_ts:
+                range_kwargs["gte"] = from_ts
+            if to_ts:
+                range_kwargs["lte"] = to_ts
+            if not range_kwargs:
+                return []
             must.append(
                 self._qmodels.FieldCondition(
                     key="ts",
-                    range=self._qmodels.Range(**range_kwargs),
+                    range=self._qmodels.DatetimeRange(**range_kwargs),
                 )
             )
         flt = self._qmodels.Filter(must=must)
