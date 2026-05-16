@@ -263,6 +263,7 @@ async def update_session(
             session_id,
             user_id=ctx.user_id,
             details=request.details,
+            policy=request.policy,
         )
 
         # Publish session_updated event
@@ -275,6 +276,7 @@ async def update_session(
                     "user_id": ctx.user_id,
                     "intention": session.get("intention"),
                     "details": session.get("details"),
+                    "policy": session.get("policy"),
                 }
             )
 

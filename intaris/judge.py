@@ -32,6 +32,7 @@ from typing import Any
 
 from intaris.config import JudgeConfig
 from intaris.llm import LLMClient, parse_json_response
+from intaris.policy import effective_policy_for_evaluator
 from intaris.precedent import find_authoritative_precedent
 from intaris.prompts import render_user_decisions_section
 from intaris.sanitize import (
@@ -509,8 +510,9 @@ def _build_judge_prompt(
     )
 
     # Session policy
-    if policy:
-        policy_str = sanitize_for_prompt(json.dumps(policy, indent=2))
+    effective_policy = effective_policy_for_evaluator(policy)
+    if effective_policy:
+        policy_str = sanitize_for_prompt(json.dumps(effective_policy, indent=2))
         sections.append(
             f"## Session Policy\n{wrap_with_boundary(policy_str, 'policy')}"
         )

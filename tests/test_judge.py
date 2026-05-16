@@ -101,6 +101,31 @@ def _create_escalated_record(audit_store, call_id="test-call", user_id="test-use
     )
 
 
+def test_judge_prompt_uses_effective_policy_view():
+    from intaris.judge import _build_judge_prompt
+
+    prompt = _build_judge_prompt(
+        intention="Review an escalated git commit",
+        policy={
+            "allow_paths": [
+                "/Users/fpytloun/*",
+                "/Users/fpytloun/src/lumilens/beskar/ansible/*",
+            ]
+        },
+        recent_history=[],
+        session_stats={},
+        tool="bash",
+        args_redacted={"command": "git commit -m test"},
+        evaluator_reasoning="Escalated for review",
+        evaluator_risk="high",
+        evaluation_path="llm",
+        agent_id=None,
+    )
+
+    assert '"/Users/fpytloun/*"' in prompt
+    assert '"/Users/fpytloun/src/lumilens/beskar/ansible/*"' not in prompt
+
+
 # ── Config Tests ──────────────────────────────────────────────────────
 
 

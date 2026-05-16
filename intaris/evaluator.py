@@ -19,6 +19,7 @@ For MCP proxy calls, the evaluator also supports:
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import logging
@@ -32,11 +33,9 @@ from intaris.audit import AuditStore
 from intaris.classifier import (
     Classification,
     classify,
-    extract_bash_paths,
-    extract_paths,
     is_path_within,
     is_read_only,
-    resolve_path,
+    resolve_tool_paths,
 )
 from intaris.config import AnalysisConfig
 from intaris.db import Database
@@ -47,6 +46,7 @@ from intaris.decision import (
     make_fast_decision,
 )
 from intaris.llm import LLMClient, parse_json_response
+from intaris.policy import effective_policy_for_evaluator
 from intaris.precedent import find_authoritative_precedent
 from intaris.prompts import (
     SAFETY_EVALUATION_SCHEMA,
@@ -110,6 +110,79 @@ def _apply_authoritative_user_precedent(
         reasoning=reasoning,
         decision="approve",
     )
+
+
+def _resolve_tool_paths_for_context(
+    tool: str,
+    args: dict[str, Any],
+    working_directory: str,
+) -> list[str]:
+    """Resolve tool target paths for evaluator policy context."""
+    return resolve_tool_paths(tool, args, working_directory)
+
+
+def _build_path_policy_context(
+    *,
+    resolved_paths: list[str],
+    working_directory: str,
+    policy: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build deterministic path-policy facts for LLM evaluation."""
+    policy = policy or {}
+    allow_paths = [p for p in policy.get("allow_paths", []) if isinstance(p, str)]
+    deny_paths = [p for p in policy.get("deny_paths", []) if isinstance(p, str)]
+    effective_policy = effective_policy_for_evaluator(policy) or {}
+    effective_allow_paths = [
+        p for p in effective_policy.get("allow_paths", []) if isinstance(p, str)
+    ]
+    working_directory_allowed = (
+        bool(working_directory)
+        and bool(allow_paths)
+        and any(
+            _path_allowed_by_pattern(working_directory, pattern)
+            for pattern in allow_paths
+        )
+    )
+    working_directory_denied = bool(working_directory) and any(
+        _path_allowed_by_pattern(working_directory, pattern) for pattern in deny_paths
+    )
+    return {
+        "working_directory": working_directory,
+        "working_directory_allowed_by_policy": working_directory_allowed,
+        "working_directory_denied_by_policy": working_directory_denied,
+        "target_paths": resolved_paths,
+        "inside_working_directory": [
+            path for path in resolved_paths if is_path_within(path, working_directory)
+        ],
+        "outside_working_directory": [
+            path
+            for path in resolved_paths
+            if not is_path_within(path, working_directory)
+        ],
+        "allow_paths": effective_allow_paths,
+        "deny_paths": deny_paths,
+        "all_targets_allowed_by_policy": bool(resolved_paths)
+        and bool(allow_paths)
+        and all(
+            any(fnmatch.fnmatch(path, pattern) for pattern in allow_paths)
+            for path in resolved_paths
+        ),
+        "any_target_denied_by_policy": bool(resolved_paths)
+        and any(
+            any(fnmatch.fnmatch(path, pattern) for pattern in deny_paths)
+            for path in resolved_paths
+        ),
+    }
+
+
+def _path_allowed_by_pattern(path: str, pattern: str) -> bool:
+    """Match path policy patterns against a path or the root they imply."""
+
+    if fnmatch.fnmatch(path, pattern):
+        return True
+    if pattern.endswith("/*") and path == pattern[:-2]:
+        return True
+    return False
 
 
 class Evaluator:
@@ -435,15 +508,8 @@ class Evaluator:
             and working_directory
             and is_read_only(tool, args)
         ):
-            raw_paths = extract_paths(args)
-            # Also extract absolute paths from bash commands for consistency
-            # with the classifier's _resolve_tool_paths().
-            if tool == "bash":
-                command = args.get("command", "") or args.get("cmd", "")
-                if command:
-                    raw_paths.extend(extract_bash_paths(str(command)))
-            if raw_paths:
-                resolved_paths = [resolve_path(p, working_directory) for p in raw_paths]
+            resolved_paths = resolve_tool_paths(tool, args, working_directory)
+            if resolved_paths:
                 outside_paths = [
                     rp
                     for rp in resolved_paths
@@ -462,10 +528,20 @@ class Evaluator:
                             outside_paths,
                         )
 
-        # Inject project_path into LLM context for WRITE evaluations
+        # Inject project_path and deterministic path-policy facts into LLM
+        # context for WRITE evaluations. Git-style write commands often have
+        # no explicit file arguments, so include the working directory itself.
         if working_directory and classification == Classification.WRITE:
             context = dict(context) if context else {}
             context["project_path"] = working_directory
+            policy_paths = _resolve_tool_paths_for_context(
+                tool, args_redacted, working_directory
+            )
+            context["path_policy"] = _build_path_policy_context(
+                resolved_paths=policy_paths,
+                working_directory=working_directory,
+                policy=session_policy,
+            )
 
         # Step 3-5: Fast paths for read-only, critical, and escalate
         if classification == Classification.READ:
@@ -841,16 +917,11 @@ class Evaluator:
             return
 
         # Extract and resolve paths
-        raw_paths = extract_paths(args_redacted)
-        if tool == "bash" or tool == "Bash":
-            command = args_redacted.get("command", "") or args_redacted.get("cmd", "")
-            if command:
-                raw_paths.extend(extract_bash_paths(str(command)))
-        if not raw_paths:
+        resolved_paths = resolve_tool_paths(tool, args_redacted, working_directory)
+        if not resolved_paths:
             return
 
-        for p in raw_paths:
-            resolved = resolve_path(p, working_directory)
+        for resolved in resolved_paths:
             if not is_path_within(resolved, working_directory):
                 prefix = _compute_path_prefix(resolved, working_directory)
                 self._approve_path_prefix(user_id, session_id, prefix)
@@ -931,7 +1002,7 @@ class Evaluator:
 
         user_prompt = build_evaluation_user_prompt(
             intention=session["intention"],
-            policy=session.get("policy"),
+            policy=effective_policy_for_evaluator(session.get("policy")),
             recent_history=recent_history,
             recent_reasoning=recent_reasoning,
             user_decisions=user_decisions,

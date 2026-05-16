@@ -1373,6 +1373,64 @@ class TestEvaluatorBootstrap:
 class TestIntentionSourceColumn:
     """Tests for the intention_source column on sessions."""
 
+    def test_write_evaluation_includes_allowed_cwd_policy_context(
+        self, db, session_store
+    ):
+        from intaris.audit import AuditStore
+
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": true, "risk": "low", '
+            '"reasoning": "Safe", "decision": "approve"}'
+        )
+        working_directory = (
+            "/Users/fpytloun/src/lumilens/beskar/.worktrees/feat-bisync-edge-server-ha"
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-policy-cwd",
+            intention="Commit the current worktree changes",
+            details={"working_directory": working_directory},
+            policy={
+                "allow_paths": [
+                    "/tmp/*",
+                    "/Users/fpytloun/*",
+                    "/Users/fpytloun/src/lumilens/beskar/ansible/*",
+                ]
+            },
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=session_store,
+            audit_store=AuditStore(db),
+            db=db,
+        )
+
+        evaluator.evaluate(
+            user_id="user-1",
+            session_id="sess-policy-cwd",
+            agent_id=None,
+            tool="bash",
+            args={"command": "git commit -m test"},
+        )
+
+        messages = llm.generate.call_args[0][0]
+        user_prompt = messages[1]["content"]
+        assert '"working_directory_allowed_by_policy": true' in user_prompt
+        assert '"working_directory_denied_by_policy": false' in user_prompt
+        assert f'"working_directory": "{working_directory}"' in user_prompt
+        assert '"/Users/fpytloun/*"' in user_prompt
+        assert '"/Users/fpytloun/src/lumilens/beskar/ansible/*"' not in user_prompt
+
+        session = session_store.get("sess-policy-cwd", user_id="user-1")
+        assert session["policy"] == {
+            "allow_paths": [
+                "/tmp/*",
+                "/Users/fpytloun/*",
+                "/Users/fpytloun/src/lumilens/beskar/ansible/*",
+            ]
+        }
+
     def test_default_intention_source(self, session_store):
         """New sessions have intention_source='initial'."""
         session = session_store.create(
@@ -1414,6 +1472,29 @@ class TestIntentionSourceColumn:
 
         session = session_store.get("sess-1", user_id="user-1")
         assert session["intention_source"] == "user"
+
+    def test_update_policy_preserves_other_session_fields(self, session_store):
+        """update_session can replace policy without clobbering details/intention."""
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-1",
+            intention="Initial",
+            details={"source": "cognis"},
+            policy={"allow_paths": ["/tmp/*"]},
+        )
+
+        session_store.update_session(
+            "sess-1",
+            user_id="user-1",
+            policy={"allow_paths": ["/tmp/*", "/home/user/src/cognis/*"]},
+        )
+
+        session = session_store.get("sess-1", user_id="user-1")
+        assert session["intention"] == "Initial"
+        assert session["details"] == {"source": "cognis"}
+        assert session["policy"] == {
+            "allow_paths": ["/tmp/*", "/home/user/src/cognis/*"]
+        }
 
 
 # ── Evaluator get_recent Filter ──────────────────────────────────────

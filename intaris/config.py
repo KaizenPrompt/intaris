@@ -570,6 +570,19 @@ class Config:
                 "DB_POOL_MIN_CONN cannot be greater than DB_POOL_MAX_CONN."
             )
 
+        # Validate enum-like settings before required secrets so malformed
+        # values are reported deterministically even in unauthenticated tests.
+        if self.judge.mode not in ("disabled", "auto", "advisory"):
+            raise ValueError(
+                f"JUDGE_MODE={self.judge.mode} is not supported. "
+                "Use 'disabled', 'auto', or 'advisory'."
+            )
+        if self.judge.notify_mode not in ("deny_only", "always", "never"):
+            raise ValueError(
+                f"JUDGE_NOTIFY_MODE={self.judge.notify_mode} is not supported. "
+                "Use 'deny_only', 'always', or 'never'."
+            )
+
         if not self.llm.api_key:
             raise ValueError(
                 "LLM API key is required. Set LLM_API_KEY or OPENAI_API_KEY."
@@ -682,17 +695,7 @@ class Config:
                 "to disable behavioral analysis."
             )
 
-        # Judge configuration validation.
-        if self.judge.mode not in ("disabled", "auto", "advisory"):
-            raise ValueError(
-                f"JUDGE_MODE={self.judge.mode} is not supported. "
-                "Use 'disabled', 'auto', or 'advisory'."
-            )
-        if self.judge.notify_mode not in ("deny_only", "always", "never"):
-            raise ValueError(
-                f"JUDGE_NOTIFY_MODE={self.judge.notify_mode} is not supported. "
-                "Use 'deny_only', 'always', or 'never'."
-            )
+        # Judge runtime dependency validation.
         if self.judge.mode != "disabled" and not self.llm_judge.api_key:
             logger.warning(
                 "JUDGE_MODE=%s but no judge LLM API key configured. "

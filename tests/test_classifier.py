@@ -7,6 +7,7 @@ import pytest
 from intaris.classifier import (
     Classification,
     classify,
+    extract_apply_patch_paths,
     extract_bash_paths,
     extract_paths,
     is_path_within,
@@ -491,6 +492,55 @@ class TestPathExtraction:
     def test_extract_ignores_unknown_keys(self):
         assert extract_paths({"content": "/etc/shadow"}) == []
 
+    def test_extract_apply_patch_update_file(self):
+        patch = """*** Begin Patch
+*** Update File: /home/user/src/cognis/.worktrees/fix/tests/test_agent.py
+@@
+-old
++new
+*** End Patch"""
+
+        assert extract_apply_patch_paths(patch) == [
+            "/home/user/src/cognis/.worktrees/fix/tests/test_agent.py"
+        ]
+
+    def test_extract_apply_patch_move_file(self):
+        patch = """*** Begin Patch
+*** Update File: src/old.py
+*** Move to: src/new.py
+@@
+-old
++new
+*** End Patch"""
+
+        assert extract_apply_patch_paths(patch) == ["src/old.py", "src/new.py"]
+
+    def test_extract_apply_patch_ignores_diff_body_paths(self):
+        patch = """*** Begin Patch
+*** Update File: src/app.py
+@@
++LOG = "/etc/shadow"
+*** End Patch"""
+
+        assert extract_apply_patch_paths(patch) == ["src/app.py"]
+
+    def test_extract_apply_patch_unified_diff_paths(self):
+        patch = """--- a/src/app.py
++++ b/src/app.py
+@@
+-old
++new"""
+
+        assert extract_apply_patch_paths(patch) == ["src/app.py"]
+
+    def test_extract_apply_patch_unified_diff_add_file(self):
+        patch = """--- /dev/null
++++ b/src/new.py
+@@
++new"""
+
+        assert extract_apply_patch_paths(patch) == ["src/new.py"]
+
 
 class TestBashPathExtraction:
     """Test absolute path extraction from bash commands."""
@@ -795,6 +845,46 @@ class TestPathPolicy:
                 working_directory=self.WD,
             )
             == Classification.CRITICAL
+        )
+
+    def test_apply_patch_deny_paths(self):
+        """deny_paths catches apply_patch target headers."""
+        policy = {"deny_paths": ["/etc/*"]}
+        patch = """*** Begin Patch
+*** Update File: /etc/shadow
+@@
+-old
++new
+*** End Patch"""
+
+        assert (
+            classify(
+                "apply_patch",
+                {"patchText": patch},
+                session_policy=policy,
+                working_directory=self.WD,
+            )
+            == Classification.CRITICAL
+        )
+
+    def test_apply_patch_nested_allow_path_remains_write(self):
+        """Allowed apply_patch targets remain write operations for LLM review."""
+        policy = {"allow_paths": ["/home/user/src/cognis/*"]}
+        patch = """*** Begin Patch
+*** Update File: /home/user/src/cognis/.worktrees/fix/tests/test_agent.py
+@@
+-old
++new
+*** End Patch"""
+
+        assert (
+            classify(
+                "apply_patch",
+                {"patchText": patch},
+                session_policy=policy,
+                working_directory=self.WD,
+            )
+            == Classification.WRITE
         )
 
 

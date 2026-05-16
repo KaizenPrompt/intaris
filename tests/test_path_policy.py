@@ -17,7 +17,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from intaris.evaluator import Evaluator, _compute_path_prefix, _try_merge_prefix
+from intaris.evaluator import (
+    Evaluator,
+    _build_path_policy_context,
+    _compute_path_prefix,
+    _resolve_tool_paths_for_context,
+    _try_merge_prefix,
+)
+from intaris.policy import effective_policy_for_evaluator
 
 
 class TestComputePathPrefix:
@@ -80,6 +87,139 @@ class TestComputePathPrefix:
         # Prefix should be /var/log, not /var/
         assert not "/var/run/secret".startswith(prefix + "/")
         assert not "/var/run/secret".startswith(prefix)
+
+
+class TestPathPolicyContext:
+    """Test deterministic path-policy facts for LLM evaluation."""
+
+    def test_effective_policy_removes_redundant_child_allow_paths(self):
+        policy = {
+            "allow_paths": [
+                "/tmp/*",
+                "/var/tmp/*",
+                "/Users/fpytloun/src/lumilens/beskar/ansible/*",
+                "/Users/fpytloun/*",
+                "/Users/*/complex/*",
+            ],
+            "deny_paths": ["/Users/fpytloun/.ssh/*"],
+        }
+
+        assert effective_policy_for_evaluator(policy) == {
+            "allow_paths": [
+                "/tmp/*",
+                "/var/tmp/*",
+                "/Users/fpytloun/*",
+                "/Users/*/complex/*",
+            ],
+            "deny_paths": ["/Users/fpytloun/.ssh/*"],
+        }
+        assert policy["allow_paths"][2] == (
+            "/Users/fpytloun/src/lumilens/beskar/ansible/*"
+        )
+
+    def test_effective_policy_preserves_first_duplicate_allow_path(self):
+        policy = {"allow_paths": ["/Users/fpytloun/*", "/Users/fpytloun/*"]}
+
+        assert effective_policy_for_evaluator(policy) == {
+            "allow_paths": ["/Users/fpytloun/*"]
+        }
+
+    def test_apply_patch_context_marks_nested_worktree_target_allowed(self):
+        working_directory = "/home/user/src/cognis"
+        policy = {"allow_paths": ["/home/user/src/cognis/*"]}
+        patch = """*** Begin Patch
+*** Update File: /home/user/src/cognis/.worktrees/fix/tests/test_agent.py
+@@
+-old
++new
+*** End Patch"""
+
+        resolved = _resolve_tool_paths_for_context(
+            "apply_patch", {"patchText": patch}, working_directory
+        )
+        context = _build_path_policy_context(
+            resolved_paths=resolved,
+            working_directory=working_directory,
+            policy=policy,
+        )
+
+        assert resolved == ["/home/user/src/cognis/.worktrees/fix/tests/test_agent.py"]
+        assert context["target_paths"] == resolved
+        assert context["inside_working_directory"] == resolved
+        assert context["outside_working_directory"] == []
+        assert context["working_directory_allowed_by_policy"] is True
+        assert context["working_directory_denied_by_policy"] is False
+        assert context["all_targets_allowed_by_policy"] is True
+        assert context["any_target_denied_by_policy"] is False
+
+    def test_bash_context_marks_nested_worktree_cwd_allowed_by_home_policy(self):
+        working_directory = (
+            "/Users/fpytloun/src/lumilens/beskar/.worktrees/feat-bisync-edge-server-ha"
+        )
+        policy = {"allow_paths": ["/Users/fpytloun/*"]}
+
+        resolved = _resolve_tool_paths_for_context(
+            "bash", {"command": "git commit -m test"}, working_directory
+        )
+        context = _build_path_policy_context(
+            resolved_paths=resolved,
+            working_directory=working_directory,
+            policy=policy,
+        )
+
+        assert resolved == []
+        assert context["working_directory"] == working_directory
+        assert context["working_directory_allowed_by_policy"] is True
+        assert context["working_directory_denied_by_policy"] is False
+        assert context["target_paths"] == []
+        assert context["all_targets_allowed_by_policy"] is False
+
+    def test_path_policy_context_exposes_reduced_allow_paths_only(self):
+        working_directory = "/Users/fpytloun/src/lumilens/beskar/.worktrees/fix"
+        policy = {
+            "allow_paths": [
+                "/tmp/*",
+                "/Users/fpytloun/src/lumilens/beskar/ansible/*",
+                "/Users/fpytloun/*",
+            ]
+        }
+
+        context = _build_path_policy_context(
+            resolved_paths=[],
+            working_directory=working_directory,
+            policy=policy,
+        )
+
+        assert context["working_directory_allowed_by_policy"] is True
+        assert context["allow_paths"] == ["/tmp/*", "/Users/fpytloun/*"]
+
+    def test_apply_patch_context_detects_denied_move_destination(self):
+        working_directory = "/home/user/src/cognis"
+        policy = {"allow_paths": ["/home/user/src/cognis/*"], "deny_paths": ["/tmp/*"]}
+        patch = """*** Begin Patch
+*** Update File: src/app.py
+*** Move to: /tmp/app.py
+@@
+-old
++new
+*** End Patch"""
+
+        resolved = _resolve_tool_paths_for_context(
+            "apply_patch", {"patchText": patch}, working_directory
+        )
+        context = _build_path_policy_context(
+            resolved_paths=resolved,
+            working_directory=working_directory,
+            policy=policy,
+        )
+
+        assert resolved == ["/home/user/src/cognis/src/app.py", "/tmp/app.py"]
+        assert context["inside_working_directory"] == [
+            "/home/user/src/cognis/src/app.py"
+        ]
+        assert context["outside_working_directory"] == ["/tmp/app.py"]
+        assert context["all_targets_allowed_by_policy"] is False
+        assert context["any_target_denied_by_policy"] is True
 
 
 class TestApprovedPathsCache:

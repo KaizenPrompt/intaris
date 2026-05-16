@@ -172,6 +172,7 @@ class SessionStore:
         user_id: str,
         intention: str | None = None,
         details: dict[str, Any] | None = None,
+        policy: dict[str, Any] | None = None,
         intention_source: str | None = None,
         title: str | None = None,
     ) -> dict[str, Any]:
@@ -198,6 +199,7 @@ class SessionStore:
         if (
             intention is None
             and details is None
+            and policy is None
             and intention_source is None
             and title is None
         ):
@@ -213,6 +215,9 @@ class SessionStore:
         if details is not None:
             sets.append("details = ?")
             params.append(json.dumps(details))
+        if policy is not None:
+            sets.append("policy = ?")
+            params.append(json.dumps(policy))
         if intention_source is not None:
             sets.append("intention_source = ?")
             params.append(intention_source)

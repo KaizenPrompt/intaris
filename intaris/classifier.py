@@ -226,6 +226,13 @@ PATH_ARG_KEYS: tuple[str, ...] = (
 # without trying to handle all shell constructs.
 _BASH_ABSOLUTE_PATH_RE = re.compile(r"(?<![a-zA-Z0-9_:])(/[a-zA-Z0-9_./-]+)")
 
+# apply_patch envelope headers that introduce filesystem targets.
+_APPLY_PATCH_PATH_RE = re.compile(
+    r"^\*\*\* (?:Add|Update|Delete) File: (?P<path>.+)$", re.MULTILINE
+)
+_APPLY_PATCH_MOVE_RE = re.compile(r"^\*\*\* Move to: (?P<path>.+)$", re.MULTILINE)
+_UNIFIED_DIFF_PATH_RE = re.compile(r"^(?:---|\+\+\+) (?P<path>.+)$", re.MULTILINE)
+
 
 def extract_paths(args: dict[str, Any]) -> list[str]:
     """Extract file paths from tool arguments.
@@ -244,6 +251,38 @@ def extract_paths(args: dict[str, Any]) -> list[str]:
         if isinstance(val, str) and val:
             paths.append(val)
     return paths
+
+
+def extract_apply_patch_paths(patch_text: str) -> list[str]:
+    """Extract target paths from apply_patch input.
+
+    Parses only structural patch headers, not arbitrary diff body content. For
+    move/rename and unified diff patches, both old and new paths are targets.
+    """
+    paths: list[str] = []
+    for match in _APPLY_PATCH_PATH_RE.finditer(patch_text):
+        path = match.group("path").strip()
+        if path:
+            paths.append(path)
+    for match in _APPLY_PATCH_MOVE_RE.finditer(patch_text):
+        path = match.group("path").strip()
+        if path:
+            paths.append(path)
+    for match in _UNIFIED_DIFF_PATH_RE.finditer(patch_text):
+        path = _normalize_unified_diff_path(match.group("path"))
+        if path and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _normalize_unified_diff_path(path_header: str) -> str | None:
+    """Normalize a unified diff ---/+++ path header."""
+    path = path_header.strip().split("\t", 1)[0].strip()
+    if not path or path == "/dev/null":
+        return None
+    if path.startswith("a/") or path.startswith("b/"):
+        return path[2:]
+    return path
 
 
 def extract_bash_paths(command: str) -> list[str]:
@@ -446,7 +485,7 @@ def classify(
 
     # Step 1.5: Session policy deny_paths (resolved path matching)
     if working_directory and session_policy:
-        resolved = _resolve_tool_paths(tool, args, working_directory)
+        resolved = resolve_tool_paths(tool, args, working_directory)
         if resolved and _check_deny_paths(resolved, session_policy):
             return Classification.CRITICAL
 
@@ -481,7 +520,7 @@ def classify(
         # If the tool would be READ but targets paths outside the project
         # directory, reclassify as WRITE to force LLM evaluation.
         if working_directory:
-            resolved = _resolve_tool_paths(tool, args, working_directory)
+            resolved = resolve_tool_paths(tool, args, working_directory)
             if resolved:
                 path_override = _check_path_policy(
                     resolved, working_directory, session_policy or {}
@@ -494,7 +533,7 @@ def classify(
     return Classification.WRITE
 
 
-def _resolve_tool_paths(
+def resolve_tool_paths(
     tool: str, args: dict[str, Any], working_directory: str
 ) -> list[str]:
     """Extract and resolve file paths from tool arguments.
@@ -512,6 +551,13 @@ def _resolve_tool_paths(
         List of resolved (normalized absolute) paths.
     """
     raw_paths = extract_paths(args)
+
+    # apply_patch stores target paths inside the patch envelope rather than
+    # in a conventional file_path/path argument.
+    if tool == "apply_patch":
+        patch_text = args.get("patchText")
+        if isinstance(patch_text, str) and patch_text:
+            raw_paths.extend(extract_apply_patch_paths(patch_text))
 
     # For bash commands, also extract absolute paths from the command string
     if tool == "bash":

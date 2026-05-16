@@ -404,6 +404,23 @@ class TestSessions:
         assert data["intention"] == "Test session for unit tests"
         assert data["status"] == "active"
 
+    def test_update_session_policy(self, client_no_auth):
+        headers = {"X-User-Id": "user1", "X-Agent-Id": "agent-1"}
+        _create_session(client_no_auth, "sess-policy-update", headers)
+
+        resp = client_no_auth.patch(
+            "/api/v1/session/sess-policy-update",
+            json={
+                "details": {"working_directory": "/home/user/src/cognis"},
+                "policy": {"allow_paths": ["/tmp/*", "/home/user/src/cognis/*"]},
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["details"] == {"working_directory": "/home/user/src/cognis"}
+        assert data["policy"] == {"allow_paths": ["/tmp/*", "/home/user/src/cognis/*"]}
+
 
 class TestSessionEvents:
     """Tests for session event recording endpoints."""
@@ -612,9 +629,7 @@ class TestSessionEvents:
             "data_source": ["assistant_reply"],
             "turn_id": "turn-1",
         }
-        assert [event["type"] for event in payload["events"]] == [
-            "assistant_message"
-        ]
+        assert [event["type"] for event in payload["events"]] == ["assistant_message"]
         assert len(payload["audit_log"]) == 1
         assert payload["audit_log"][0]["call_id"] == "call-export-filter-1"
 
@@ -790,7 +805,10 @@ class TestSessionEvents:
         assert events.status_code == 200
         payload = events.json()
         assert [event["type"] for event in payload["events"]] == ["assistant_thinking"]
-        assert payload["events"][0]["data"]["title"] == "Considering calibration for migration"
+        assert (
+            payload["events"][0]["data"]["title"]
+            == "Considering calibration for migration"
+        )
         assert payload["events"][0]["data"]["block_id"] == "thk_1"
 
     def test_read_events_rejects_invalid_position_range(self, client_no_auth):

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.8] - 2026-05-16
+
+### Fixed
+
+- **Filesystem path policy** -- Extract patch target paths and expose working-directory policy facts to the evaluator so patch-style edits are judged against the correct project boundary.
+- **Session policy updates** -- Persist allow, deny, and path policy changes when sessions are patched through the API.
+- **Judge and evaluator policy context** -- Simplify policy context assembly so judge reviews and prompts see consistent working-directory policy details.
+- **Configuration validation** -- Report malformed judge mode settings before missing LLM credentials so startup and tests fail on the actionable configuration error first.
+
+### Changed
+
+- **Release metadata** -- Bump the Intaris package and MCP proxy client identity to `0.4.8`.
+
 ## [0.4.7] - 2026-05-04
 
 ### Added
@@ -226,6 +239,7 @@ Initial release.
 - **Client integrations** -- OpenCode plugin (`intaris.ts`) and Claude Code hooks (bash scripts).
 - **Documentation** -- Architecture, evaluation pipeline, configuration, REST API, MCP proxy, management UI, deployment, development, and client integration guides.
 
+[0.4.8]: https://github.com/fpytloun/intaris/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/fpytloun/intaris/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/fpytloun/intaris/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/fpytloun/intaris/compare/v0.4.4...v0.4.5

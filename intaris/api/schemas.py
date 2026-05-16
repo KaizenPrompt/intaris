@@ -276,10 +276,22 @@ class StatusUpdateResponse(BaseModel):
 
 
 class SessionUpdateRequest(BaseModel):
-    """Request to update session fields (intention, details)."""
+    """Request to update session fields (intention, details, policy)."""
 
     intention: str | None = Field(None, max_length=500, description="Updated intention")
     details: dict[str, Any] | None = Field(None, description="Updated session details")
+    policy: SessionPolicy | dict[str, Any] | None = Field(
+        None, description="Updated session policy"
+    )
+
+    @model_validator(mode="after")
+    def _normalize_policy(self) -> SessionUpdateRequest:
+        if isinstance(self.policy, dict):
+            validated = SessionPolicy(**self.policy)
+            self.policy = validated.model_dump(exclude_none=True)
+        elif isinstance(self.policy, SessionPolicy):
+            self.policy = self.policy.model_dump(exclude_none=True)
+        return self
 
 
 # ── Error ─────────────────────────────────────────────────────────────
