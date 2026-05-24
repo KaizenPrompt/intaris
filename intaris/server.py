@@ -101,11 +101,28 @@ def _get_evaluator(alignment_barrier=None):
     return _evaluator
 
 
-# ── Health Endpoint ───────────────────────────────────────────────────
+# ── Health Endpoints ──────────────────────────────────────────────────
 
 
-async def health_check(request: Request) -> JSONResponse:
-    """Health check endpoint for Kubernetes readiness probes.
+async def live_check(request: Request) -> JSONResponse:
+    """Cheap liveness check for Kubernetes liveness probes.
+
+    This endpoint intentionally avoids database access, worker queue
+    inspection, and other potentially blocking work. Liveness should only
+    prove that the process and ASGI event loop can respond; readiness and
+    diagnostic endpoints can perform deeper checks.
+    """
+    return JSONResponse(
+        {
+            "healthy": True,
+            "service": "intaris",
+            "version": __version__,
+        }
+    )
+
+
+async def ready_check(request: Request) -> JSONResponse:
+    """Readiness check endpoint for Kubernetes readiness probes.
 
     Includes behavioral analysis pipeline status when analysis is enabled.
     """
@@ -169,6 +186,11 @@ async def health_check(request: Request) -> JSONResponse:
     return JSONResponse(response)
 
 
+async def health_check(request: Request) -> JSONResponse:
+    """Backward-compatible detailed health endpoint."""
+    return await ready_check(request)
+
+
 # ── API Key Middleware ────────────────────────────────────────────────
 
 
@@ -185,12 +207,10 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        cfg = _get_config()
-
         # Skip auth for health endpoint, static UI files, action tokens,
         # and the exchange token endpoint (it validates the token itself).
         if (
-            request.url.path in ("/", "/health")
+            request.url.path in ("/", "/health", "/live", "/ready")
             or request.url.path
             in (
                 "/ui",
@@ -201,6 +221,8 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             or request.url.path == "/api/v1/auth/exchange"
         ):
             return await call_next(request)
+
+        cfg = _get_config()
 
         try:
             from intaris.sanitize import validate_agent_id
@@ -926,6 +948,8 @@ def create_app() -> Starlette:
 
     routes.extend(
         [
+            Route("/live", live_check),
+            Route("/ready", ready_check),
             Route("/health", health_check),
             Route("/api/v1/action/{token:path}", action_get, methods=["GET"]),
             Route("/api/v1/action/{token:path}", action_post, methods=["POST"]),

@@ -800,7 +800,7 @@ Health check endpoint (no authentication required).
 ```json
 {
   "status": "ok",
-  "version": "0.4.8"
+  "version": "0.4.9"
 }
 ```
 
