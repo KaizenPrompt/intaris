@@ -74,12 +74,18 @@ def mock_metrics():
     return Metrics()
 
 
-def _create_session(session_store, session_id="test-session", user_id="test-user"):
+def _create_session(
+    session_store,
+    session_id="test-session",
+    user_id="test-user",
+    policy=None,
+):
     """Helper to create a test session."""
     session_store.create(
         session_id=session_id,
         user_id=user_id,
         intention="Test session for unit testing",
+        policy=policy,
     )
 
 
@@ -124,6 +130,36 @@ def test_judge_prompt_uses_effective_policy_view():
 
     assert '"/Users/fpytloun/*"' in prompt
     assert '"/Users/fpytloun/src/lumilens/beskar/ansible/*"' not in prompt
+
+
+def test_judge_resolution_policy_ignores_string_false_escalation_flag():
+    from intaris.judge import _judge_resolution_policy
+
+    policy = _judge_resolution_policy(
+        {
+            "judge": {
+                "allowed_decisions": ["approve", "deny", "defer"],
+                "allow_human_escalation": "false",
+            }
+        },
+        config_mode="advisory",
+    )
+
+    assert policy.allow_human_escalation is False
+    assert "defer" not in policy.allowed_decisions
+
+
+def test_judge_resolution_policy_interaction_none_disallows_defer():
+    from intaris.judge import _judge_resolution_policy
+
+    policy = _judge_resolution_policy(
+        {"interaction_mode": "none"},
+        config_mode="advisory",
+    )
+
+    assert policy.allowed_decisions == frozenset({"approve", "deny"})
+    assert policy.on_uncertain == "deny"
+    assert policy.allow_human_escalation is False
 
 
 # ── Config Tests ──────────────────────────────────────────────────────
@@ -1131,6 +1167,59 @@ class TestJudgeReviewer:
             assert record["judge_decision"] == "defer"
             assert record["judge_risk"] == "medium"
             assert mock_metrics.judge_deferrals_total == 1
+
+        asyncio.run(_test())
+
+    def test_advisory_non_interactive_policy_converts_defer_to_deny(
+        self, mock_llm, audit_store, session_store, mock_evaluator, mock_metrics
+    ):
+        """Non-interactive sessions must not leave unresolved judge deferrals."""
+
+        async def _test():
+            _create_session(
+                session_store,
+                policy={
+                    "interaction_mode": "none",
+                    "judge": {
+                        "allowed_decisions": ["approve", "deny"],
+                        "on_uncertain": "deny",
+                        "allow_human_escalation": False,
+                    },
+                },
+            )
+            _create_escalated_record(audit_store)
+
+            mock_llm.generate.return_value = json.dumps(
+                {
+                    "decision": "defer",
+                    "reasoning": "Needs human judgment on scope",
+                    "risk": "medium",
+                    "confidence": "medium",
+                }
+            )
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+                mode="advisory",
+            )
+
+            await reviewer.review_and_resolve(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+            )
+
+            record = audit_store.get_by_call_id("test-call", user_id="test-user")
+            assert record["user_decision"] == "deny"
+            assert record["resolved_by"] == "judge"
+            assert record["judge_decision"] == "deny"
+            assert "session policy disallowed decision" in record["judge_reasoning"]
+            assert mock_metrics.judge_denials_total == 1
+            assert mock_metrics.judge_deferrals_total == 0
 
         asyncio.run(_test())
 

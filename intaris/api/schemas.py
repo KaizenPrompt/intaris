@@ -108,6 +108,20 @@ class SessionPolicy(BaseModel):
     deny_paths: list[str] | None = Field(
         None, description="Glob patterns for filesystem paths to deny"
     )
+    allow_policies: list[str | dict[str, Any]] | None = Field(
+        None,
+        description="Human-readable session allowances or structured policy objects",
+    )
+    deny_policies: list[str | dict[str, Any]] | None = Field(
+        None,
+        description="Human-readable hard session restrictions or structured policy objects",
+    )
+    interaction_mode: str | None = Field(
+        None, description="Caller interaction mode, used for judge resolution policy"
+    )
+    judge: dict[str, Any] | None = Field(
+        None, description="Judge resolution policy for this session"
+    )
 
     model_config = {"extra": "ignore"}
 

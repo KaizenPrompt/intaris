@@ -385,6 +385,8 @@ class Evaluator:
 
         # Redact secrets from args
         args_redacted = redact(args)
+        if context:
+            args_redacted["context"] = redact(context)
 
         # Scan for prompt injection patterns in tool args (log-only).
         # This runs AFTER redaction so we scan what the LLM will see.

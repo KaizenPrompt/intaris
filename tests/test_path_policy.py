@@ -24,7 +24,7 @@ from intaris.evaluator import (
     _resolve_tool_paths_for_context,
     _try_merge_prefix,
 )
-from intaris.policy import effective_policy_for_evaluator
+from intaris.policy import effective_policy_for_evaluator, normalized_policy_clauses
 
 
 class TestComputePathPrefix:
@@ -122,6 +122,35 @@ class TestPathPolicyContext:
 
         assert effective_policy_for_evaluator(policy) == {
             "allow_paths": ["/Users/fpytloun/*"]
+        }
+
+    def test_normalized_policy_clauses_support_strings_and_objects(self):
+        policy = {
+            "allow_policies": [
+                "Session may pass AWS SSO and grant CLI access.",
+                {"id": "slack", "text": "Session may post alert comments."},
+                {"description": "Session may query read-only metrics."},
+                "",
+                42,
+            ],
+            "deny_policies": [{"policy": "Session must not mutate SSM-managed hosts."}],
+        }
+
+        assert normalized_policy_clauses(policy) == {
+            "allow_policies": [
+                {"text": "Session may pass AWS SSO and grant CLI access."},
+                {"text": "Session may post alert comments.", "id": "slack"},
+                {
+                    "text": "Session may query read-only metrics.",
+                    "id": "policy_3",
+                },
+            ],
+            "deny_policies": [
+                {
+                    "text": "Session must not mutate SSM-managed hosts.",
+                    "id": "policy_1",
+                }
+            ],
         }
 
     def test_apply_patch_context_marks_nested_worktree_target_allowed(self):
