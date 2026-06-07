@@ -126,6 +126,43 @@ def _parse_event_filters(
     return event_types, event_sources, event_exclude_sources, event_data_sources
 
 
+def _parse_event_seqs(seqs: str | None) -> set[int] | None:
+    """Parse comma-separated exact event sequence filters."""
+    if not seqs:
+        return None
+
+    parsed: set[int] = set()
+    for raw_seq in seqs.split(","):
+        raw_seq = raw_seq.strip()
+        if not raw_seq:
+            continue
+        try:
+            seq = int(raw_seq)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="seqs must contain positive integer sequence numbers",
+            )
+        if seq <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="seqs must contain positive integer sequence numbers",
+            )
+        parsed.add(seq)
+
+    if not parsed:
+        raise HTTPException(
+            status_code=400,
+            detail="seqs must contain at least one positive integer sequence number",
+        )
+    if len(parsed) > 1000:
+        raise HTTPException(
+            status_code=400,
+            detail="seqs may contain at most 1000 sequence numbers",
+        )
+    return parsed
+
+
 def _export_filter_metadata(
     *,
     type: str | None,
@@ -192,7 +229,9 @@ def _get_export_audit_log(user_id: str, session_id: str) -> list[dict[str, Any]]
     return rows
 
 
-def _get_export_summaries(user_id: str, session_id: str) -> dict[str, list[dict[str, Any]]]:
+def _get_export_summaries(
+    user_id: str, session_id: str
+) -> dict[str, list[dict[str, Any]]]:
     """Return Intaris and agent summaries with JSON fields decoded."""
     from intaris.server import _get_db
 
@@ -437,6 +476,13 @@ async def read_events(
         ge=0,
         description="Return the last N matching events in chronological order",
     ),
+    seqs: str | None = Query(
+        None,
+        description=(
+            "Comma-separated exact event sequence numbers to return. Mutually exclusive "
+            "with after_seq, limit, and last_n."
+        ),
+    ),
     type: str | None = Query(
         None,
         description="Comma-separated event type filter (e.g., 'tool_call,evaluation')",
@@ -482,6 +528,13 @@ async def read_events(
     """Read events from a session's event log."""
     event_store = _get_event_store(request)
 
+    exact_seqs = _parse_event_seqs(seqs)
+
+    if exact_seqs and (after_seq or limit or last_n):
+        raise HTTPException(
+            status_code=400,
+            detail="seqs is mutually exclusive with after_seq, limit, and last_n",
+        )
     if last_n and after_seq:
         raise HTTPException(
             status_code=400,
@@ -515,7 +568,22 @@ async def read_events(
     _validate_session_exists(request, ctx.user_id, session_id)
 
     try:
-        if last_n:
+        if exact_seqs:
+            events = event_store.read_seqs(
+                ctx.user_id,
+                session_id,
+                seqs=exact_seqs,
+                event_types=event_types,
+                sources=event_sources,
+                exclude_sources=event_exclude_sources,
+                data_sources=event_data_sources,
+                turn_id=turn_id,
+                min_position=min_position,
+                max_position=max_position,
+                after_ts=after_ts,
+                before_ts=before_ts,
+            )
+        elif last_n:
             fetch_limit = last_n + 1
             events = event_store.read_tail(
                 ctx.user_id,
@@ -555,7 +623,9 @@ async def read_events(
 
     # Determine has_more
     has_more = False
-    if last_n and len(events) > last_n:
+    if exact_seqs:
+        has_more = False
+    elif last_n and len(events) > last_n:
         has_more = True
         events = events[-last_n:]
     elif limit and len(events) > limit:

@@ -208,7 +208,9 @@ class TestRecentReasoningPromptRendering:
                         "Plan context: add context_type to search_conversations "
                         "and pass it through to grouped search results."
                     ),
-                    "args_redacted": {"context": "Assistant proposed backend tool update."},
+                    "args_redacted": {
+                        "context": "Assistant proposed backend tool update."
+                    },
                 }
             ]
         )
@@ -248,6 +250,35 @@ class TestRecentReasoningPromptRendering:
         assert "LLM tool surface" in prompt
         assert "⟨reasoning_history⟩" in prompt
 
+    def test_build_prompt_includes_guardrails_context_as_advisory_data(self):
+        prompt = build_evaluation_user_prompt(
+            intention="Inspect monitoring state",
+            policy=None,
+            recent_history=[],
+            session_stats={
+                "total_calls": 1,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="alertmanager_silences",
+            args={},
+            agent_id="cognis",
+            context={
+                "tool": {
+                    "description": "List Alertmanager silences",
+                    "read_only": True,
+                    "capabilities": ["read"],
+                }
+            },
+        )
+
+        assert "## Guardrails Context" in prompt
+        assert "Client-provided, redacted context" in prompt
+        assert "not as authorization proof" in prompt
+        assert "List Alertmanager silences" in prompt
+        assert "⟨context⟩" in prompt
+
 
 class TestEvaluatorScopeRules:
     """The L1 evaluator must focus on operational safety, not topic or
@@ -280,8 +311,7 @@ class TestEvaluatorScopeRules:
             in SAFETY_EVALUATION_SYSTEM_PROMPT
         )
         assert (
-            "destructive or exfiltrating *operation*"
-            in SAFETY_EVALUATION_SYSTEM_PROMPT
+            "destructive or exfiltrating *operation*" in SAFETY_EVALUATION_SYSTEM_PROMPT
         )
         assert "subject matter" in SAFETY_EVALUATION_SYSTEM_PROMPT
 
@@ -295,7 +325,9 @@ class TestEvaluatorScopeRules:
     def test_prompt_approves_routine_validation_commands(self):
         assert "Routine project validation commands" in SAFETY_EVALUATION_SYSTEM_PROMPT
         assert "npm test" in SAFETY_EVALUATION_SYSTEM_PROMPT
-        assert "recent human-approved scope expansion" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        assert (
+            "recent human-approved scope expansion" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        )
 
 
 class TestJudgeScopeRules:

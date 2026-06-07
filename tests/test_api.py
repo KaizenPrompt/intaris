@@ -773,6 +773,53 @@ class TestSessionEvents:
         assert payload["events"][0]["source"] == "cognis"
         assert payload["events"][0]["data"]["source"] == "memory_search"
 
+    def test_read_events_by_exact_seqs(self, client_no_auth):
+        headers = {
+            "X-User-Id": "events-user-exact-seqs",
+            "X-Agent-Id": "agent-1",
+            "X-Intaris-Source": "cognis",
+        }
+        _create_session(client_no_auth, "sess-events-exact-seqs", headers)
+
+        resp = client_no_auth.post(
+            "/api/v1/session/sess-events-exact-seqs/events",
+            json=[
+                {"type": "user_message", "data": {"content": "first"}},
+                {"type": "tool_call", "data": {"name": "read"}},
+                {"type": "tool_result", "data": {"content": "large"}},
+                {"type": "assistant_message", "data": {"content": "reply"}},
+            ],
+            headers=headers,
+        )
+        assert resp.status_code == 200
+
+        exact = client_no_auth.get(
+            "/api/v1/session/sess-events-exact-seqs/events"
+            "?seqs=2,5&type=user_message,assistant_message",
+            headers=headers,
+        )
+
+        assert exact.status_code == 200
+        payload = exact.json()
+        assert [event["seq"] for event in payload["events"]] == [2, 5]
+        assert [event["type"] for event in payload["events"]] == [
+            "user_message",
+            "assistant_message",
+        ]
+        assert payload["has_more"] is False
+
+    def test_read_events_rejects_exact_seqs_with_pagination(self, client_no_auth):
+        headers = {"X-User-Id": "events-user-exact-seqs-2", "X-Agent-Id": "agent-1"}
+        _create_session(client_no_auth, "sess-events-exact-seqs-mutual", headers)
+
+        resp = client_no_auth.get(
+            "/api/v1/session/sess-events-exact-seqs-mutual/events?seqs=1,2&limit=1",
+            headers=headers,
+        )
+
+        assert resp.status_code == 400
+        assert "mutually exclusive" in resp.json()["detail"]
+
     def test_append_and_read_assistant_thinking_event(self, client_no_auth):
         headers = {
             "X-User-Id": "events-user-thinking",

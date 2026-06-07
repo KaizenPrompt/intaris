@@ -157,6 +157,22 @@ class EventBackend(Protocol):
         """
         ...
 
+    def read_seqs(
+        self,
+        user_id: str,
+        session_id: str,
+        seqs: set[int],
+    ) -> list[dict]:
+        """Read events by exact sequence numbers.
+
+        Args:
+            seqs: Exact event sequence numbers to return.
+
+        Returns:
+            Matching event dicts ordered by seq.
+        """
+        ...
+
     def read_tail(
         self,
         user_id: str,
@@ -309,6 +325,32 @@ class FilesystemEventBackend:
                     result.append(event)
                     if limit and len(result) >= limit:
                         return result
+        return result
+
+    def read_seqs(
+        self,
+        user_id: str,
+        session_id: str,
+        seqs: set[int],
+    ) -> list[dict]:
+        if not seqs:
+            return []
+
+        chunks: list[tuple[int, int, Path]] = []
+        for session_dir in self._session_dir_candidates(user_id, session_id):
+            chunks.extend(self._list_chunks(session_dir))
+        chunks.sort(key=lambda c: c[0])
+
+        result: list[dict] = []
+        for start_seq, end_seq, chunk_path in chunks:
+            if not any(start_seq <= seq <= end_seq for seq in seqs):
+                continue
+            events = _ndjson_to_events(chunk_path.read_bytes())
+            for event in events:
+                if event.get("seq") in seqs:
+                    result.append(event)
+
+        result.sort(key=lambda e: e.get("seq", 0))
         return result
 
     def read_tail(
@@ -533,6 +575,31 @@ class S3EventBackend:
                     result.append(event)
                     if limit and len(result) >= limit:
                         return result
+        return result
+
+    def read_seqs(
+        self,
+        user_id: str,
+        session_id: str,
+        seqs: set[int],
+    ) -> list[dict]:
+        if not seqs:
+            return []
+
+        chunks = self._list_chunks(user_id, session_id)
+
+        result: list[dict] = []
+        for start_seq, end_seq, key in chunks:
+            if not any(start_seq <= seq <= end_seq for seq in seqs):
+                continue
+            response = self._client.get_object(Bucket=self._bucket, Key=key)
+            data = response["Body"].read()
+            events = _ndjson_to_events(data)
+            for event in events:
+                if event.get("seq") in seqs:
+                    result.append(event)
+
+        result.sort(key=lambda e: e.get("seq", 0))
         return result
 
     def read_tail(

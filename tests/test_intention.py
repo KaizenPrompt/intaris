@@ -488,6 +488,50 @@ class TestEvaluatorDecisionContext:
             "this is fine and aligned"
         )
 
+    def test_evaluate_stores_context_and_passes_redacted_context_to_prompt(
+        self, db, session_store
+    ):
+        from intaris.audit import AuditStore
+
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        audit = AuditStore(db)
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": true, "risk": "low", '
+            '"reasoning": "Allowed", "decision": "approve"}'
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=session_store,
+            audit_store=audit,
+            db=db,
+        )
+
+        with patch("intaris.evaluator.build_evaluation_user_prompt") as build_prompt:
+            build_prompt.return_value = "prompt"
+            result = evaluator.evaluate(
+                user_id="user-1",
+                session_id="sess-1",
+                agent_id="agent-1",
+                tool="alertmanager_silences",
+                args={},
+                context={
+                    "tool": {
+                        "description": "List Alertmanager silences",
+                        "read_only": True,
+                    }
+                },
+            )
+
+        prompt_context = build_prompt.call_args.kwargs["context"]
+        assert prompt_context["tool"]["description"] == "List Alertmanager silences"
+        assert prompt_context["tool"]["read_only"] is True
+
+        record = audit.get_by_call_id(result["call_id"], user_id="user-1")
+        stored_context = record["args_redacted"]["__intaris_context"]
+        assert stored_context["tool"]["description"] == "List Alertmanager silences"
+        assert record["args_redacted"]["context"] == stored_context
+
     def test_llm_evaluate_honors_final_human_same_tool_approval(
         self, db, session_store
     ):

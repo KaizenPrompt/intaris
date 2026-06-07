@@ -67,8 +67,24 @@ _MAX_APPROVED_PATHS_PER_SESSION = 50
 # Prevents merging to overly broad prefixes like /Users or /home.
 # Example: /Users/foo/.cache/opencode = 4 components (excluding root).
 _MIN_MERGE_DEPTH = 4
+_CONTEXT_ARG_KEY = "__intaris_context"
 
 logger = logging.getLogger(__name__)
+
+
+def _args_redacted_with_context(
+    args_redacted: dict[str, Any],
+    context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Attach redacted evaluate context to audit args without clobbering tool args."""
+
+    if not context:
+        return args_redacted
+    result = dict(args_redacted)
+    result[_CONTEXT_ARG_KEY] = context
+    if "context" not in result:
+        result["context"] = context
+    return result
 
 
 def _apply_authoritative_user_precedent(
@@ -290,13 +306,16 @@ class Evaluator:
                 reasoning = f"{reasoning}. Reason: {status_reason}"
 
             latency_ms = int((time.monotonic() - start_time) * 1000)
+            inactive_args_redacted = _args_redacted_with_context(
+                redact(args), redact(context) if context else None
+            )
             self._audit.insert(
                 call_id=call_id,
                 user_id=user_id,
                 session_id=session_id,
                 agent_id=agent_id,
                 tool=tool,
-                args_redacted=redact(args),
+                args_redacted=inactive_args_redacted,
                 classification="write",
                 evaluation_path="fast",
                 decision="deny",
@@ -315,7 +334,7 @@ class Evaluator:
                 "risk": "low",
                 "path": "fast",
                 "latency_ms": latency_ms,
-                "args_redacted": redact(args),
+                "args_redacted": inactive_args_redacted,
                 "classification": "write",
                 "session_status": session_status,
                 "status_reason": status_reason,
@@ -337,7 +356,9 @@ class Evaluator:
             )
             if misalignment_reason:
                 latency_ms = int((time.monotonic() - start_time) * 1000)
-                args_redacted = redact(args)
+                args_redacted = _args_redacted_with_context(
+                    redact(args), redact(context) if context else None
+                )
                 args_hash = _compute_args_hash(args)
                 self._audit.insert(
                     call_id=call_id,
@@ -385,8 +406,6 @@ class Evaluator:
 
         # Redact secrets from args
         args_redacted = redact(args)
-        if context:
-            args_redacted["context"] = redact(context)
 
         # Scan for prompt injection patterns in tool args (log-only).
         # This runs AFTER redaction so we scan what the LLM will see.
@@ -396,7 +415,10 @@ class Evaluator:
         )
 
         _injection_detected = False
-        args_text = json.dumps(args_redacted, default=str)
+        injection_scan_payload: dict[str, Any] = dict(args_redacted)
+        if context:
+            injection_scan_payload[_CONTEXT_ARG_KEY] = redact(context)
+        args_text = json.dumps(injection_scan_payload, default=str)
         findings = detect_injection_patterns(args_text)
         if findings:
             log_injection_warning("tool_args", args_text, findings)
@@ -447,7 +469,9 @@ class Evaluator:
                     except ValueError:
                         pass
                     latency_ms = int((time.monotonic() - start_time) * 1000)
-                    cascade_args_redacted = redact(args)
+                    cascade_args_redacted = _args_redacted_with_context(
+                        redact(args), redact(context) if context else None
+                    )
                     cascade_reasoning = (
                         f"Session suspended — parent session is {parent_status}"
                     )
@@ -608,7 +632,7 @@ class Evaluator:
                     tool=tool,
                     args_redacted=args_redacted,
                     agent_id=agent_id,
-                    context=context,
+                    context=redact(context) if context else None,
                     parent_intention=parent_intention,
                 )
 
@@ -631,13 +655,14 @@ class Evaluator:
         latency_ms = int((time.monotonic() - start_time) * 1000)
 
         # Step 7: Audit (with args_hash for escalation retry, profile_version)
+        audit_context = redact(context) if context else None
         self._audit.insert(
             call_id=call_id,
             user_id=user_id,
             session_id=session_id,
             agent_id=agent_id,
             tool=tool,
-            args_redacted=args_redacted,
+            args_redacted=_args_redacted_with_context(args_redacted, audit_context),
             classification=classification.value,
             evaluation_path=decision.path,
             decision=decision.decision,

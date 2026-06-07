@@ -2324,6 +2324,71 @@ class TestJudgePrompt:
         assert "[context]" in prompt
         assert "gpt-4" in prompt
 
+    def test_review_packet_extracts_stored_evaluate_context(self):
+        """Judge packet receives evaluate context stored outside tool args."""
+        from intaris.judge import _build_review_packet
+
+        packet = _build_review_packet(
+            session={"policy": None},
+            record={
+                "args_redacted": {
+                    "__intaris_context": {
+                        "tool": {
+                            "description": "List Alertmanager silences",
+                            "read_only": True,
+                        },
+                        "intent": {
+                            "description": "Inspect active silences",
+                            "source": "bash.description",
+                        },
+                    }
+                }
+            },
+            latest_reasoning=None,
+            recent_reasoning=[],
+            session_hints=[],
+        )
+
+        assert packet["current_call_context"]["intent"]["description"] == (
+            "Inspect active silences"
+        )
+        assert packet["current_tool_metadata"]["description"] == (
+            "List Alertmanager silences"
+        )
+
+    def test_review_packet_skill_metadata_prefers_stored_evaluate_context(self):
+        """Known skill extraction uses stored evaluate context, not tool args."""
+        from intaris.judge import _build_review_packet
+
+        packet = _build_review_packet(
+            session={"policy": None},
+            record={},
+            latest_reasoning=None,
+            recent_reasoning=[
+                {
+                    "args_redacted": {
+                        "context": {"user_supplied": "tool argument"},
+                        "__intaris_context": {
+                            "skill": {
+                                "skill_id": "skill_1",
+                                "name": "lumilens-loki-query",
+                                "description": "Query Loki safely",
+                            }
+                        },
+                    }
+                }
+            ],
+            session_hints=[],
+        )
+
+        assert packet["known_skills"] == [
+            {
+                "skill_id": "skill_1",
+                "name": "lumilens-loki-query",
+                "description": "Query Loki safely",
+            }
+        ]
+
     def test_prompt_includes_latest_reasoning_section(self):
         from intaris.judge import _build_judge_prompt
 

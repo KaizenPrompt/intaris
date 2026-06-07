@@ -324,6 +324,23 @@ class TestFilesystemEventBackend:
         assert len(result) == 3
         assert result[0]["seq"] == 4
 
+    def test_read_seqs_returns_exact_matches_across_chunks(self, backend):
+        """Exact seq reads return only requested events from overlapping chunks."""
+        chunk1 = [
+            {"seq": i, "ts": "t", "type": "message", "data": {"index": i}}
+            for i in range(1, 4)
+        ]
+        chunk2 = [
+            {"seq": i, "ts": "t", "type": "message", "data": {"index": i}}
+            for i in range(4, 7)
+        ]
+        backend.append("alice", "sess1", chunk1)
+        backend.append("alice", "sess1", chunk2)
+
+        result = backend.read_seqs("alice", "sess1", {2, 5, 99})
+
+        assert [event["seq"] for event in result] == [2, 5]
+
     def test_read_stream(self, backend):
         events = [
             {"seq": i, "ts": "t", "type": "message", "data": {}} for i in range(1, 6)
@@ -555,6 +572,34 @@ class TestEventStore:
         )
         events = store.read("alice", "sess1", event_types={"message", "evaluation"})
         assert len(events) == 2
+
+    def test_read_seqs_combines_persisted_and_buffered_events(self, store):
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {"type": "message", "data": {"content": "one"}},
+                {"type": "tool_call", "data": {}},
+                {"type": "message", "data": {"content": "three"}},
+                {"type": "evaluation", "data": {}},
+                {"type": "message", "data": {"content": "five"}},
+            ],
+        )
+        # flush_size=5 flushes seq 1-5; seq 6 remains buffered.
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "assistant_message", "data": {"content": "six"}}],
+        )
+
+        events = store.read_seqs(
+            "alice",
+            "sess1",
+            {1, 4, 6},
+            event_types={"message", "assistant_message"},
+        )
+
+        assert [event["seq"] for event in events] == [1, 6]
 
     def test_read_with_payload_source_filter(self, store):
         store.append(

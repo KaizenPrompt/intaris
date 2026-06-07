@@ -287,6 +287,77 @@ class EventStore:
 
         return events
 
+    def read_seqs(
+        self,
+        user_id: str,
+        session_id: str,
+        seqs: set[int],
+        event_types: set[str] | None = None,
+        sources: set[str] | None = None,
+        exclude_sources: set[str] | None = None,
+        data_sources: set[str] | None = None,
+        turn_id: str | None = None,
+        min_position: int | None = None,
+        max_position: int | None = None,
+        after_ts: str | None = None,
+        before_ts: str | None = None,
+    ) -> list[dict]:
+        """Read events by exact sequence numbers from storage and buffer."""
+        if not seqs:
+            return []
+
+        events = self._backend.read_seqs(user_id, session_id, seqs)
+
+        with self._lock:
+            key = (user_id, session_id)
+            for event in self._buffers.get(key, []):
+                if event.get("seq") in seqs:
+                    events.append(event)
+
+        events.sort(key=lambda e: e.get("seq", 0))
+
+        seen: set[int] = set()
+        deduped: list[dict] = []
+        for event in events:
+            seq = event.get("seq", 0)
+            if seq not in seen:
+                seen.add(seq)
+                deduped.append(event)
+        events = deduped
+
+        events = [
+            event
+            for event in events
+            if self._event_matches_filters(
+                event,
+                event_types=event_types,
+                sources=sources,
+                exclude_sources=exclude_sources,
+                after_ts=after_ts,
+                before_ts=before_ts,
+            )
+        ]
+
+        if (
+            data_sources
+            or turn_id is not None
+            or min_position is not None
+            or max_position is not None
+        ):
+            events = [
+                event
+                for event in events
+                if self._event_matches_payload_filters(
+                    event,
+                    data_sources=data_sources,
+                    turn_id=turn_id,
+                    min_position=min_position,
+                    max_position=max_position,
+                )
+            ]
+
+        return events
+
     def read_tail(
         self,
         user_id: str,
